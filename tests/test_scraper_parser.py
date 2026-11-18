@@ -11,6 +11,7 @@ from app.scrapers.base import (
     extract_percentage,
 )
 from app.scrapers.custom import (
+    _score_candidate_url,
     match_builtin_scraper_code,
     match_existing_card,
     parse_generic_card_page,
@@ -62,6 +63,8 @@ def test_custom_scraper_helpers_and_generic_parser(tmp_path):
         unwrap_search_result_url(bing_wrapped)
         == "https://www.fubon.com/banking/personal/credit_card/all_card/openpossible/openpossible.htm"
     )
+    assert _score_candidate_url("https://www.card.rakuten.com.tw/auth/", "樂天 Panda J 卡", "樂天信用卡會員服務: 登入") < 0
+    assert _score_candidate_url("https://www.card.rakuten.com.tw/corp/product/", "樂天 Panda J 卡", "樂天 Panda J 卡國內 3% 回饋") > 0
 
     assert match_builtin_scraper_code("國泰 CUBE") == "cathay"
     assert match_builtin_scraper_code("U Bear 信用卡") == "esun"

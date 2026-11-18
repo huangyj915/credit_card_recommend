@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.async_api import Page, async_playwright
 
 from app.catalog import (
+    NON_CARD_URL_TOKENS,
     TAIWAN_BANKS,
     TAIWAN_BANK_HINTS,
     discover_bank_cards_via_playwright,
@@ -122,11 +123,26 @@ def match_existing_card(
     return None
 
 
-def _score_candidate_url(href: str, card_name: str) -> int:
-    """Score search result URLs so official Taiwan bank pages rank highest."""
+def _score_candidate_url(href: str, card_name: str, snippet_text: str = "") -> int:
+    """Score search result URLs so official Taiwan bank card intro pages rank highest."""
     lowered = href.lower()
-    if any(skip in lowered for skip in ("bing.com", "microsoft.com", "duckduckgo.com", "google.com")):
+    snippet_lower = (snippet_text or "").lower()
+    if any(
+        skip in lowered
+        for skip in (
+            "bing.com",
+            "microsoft.com",
+            "duckduckgo.com",
+            "google.com",
+            "wikipedia.org",
+        )
+    ):
         return -100
+    if any(tok in lowered for tok in NON_CARD_URL_TOKENS):
+        return -100
+    if any(auth_word in snippet_lower for auth_word in ("會員服務: 登入", "使用者密碼", "忘記密碼", "卡友登入")):
+        return -100
+
     score = 0
     if ".com.tw" in lowered:
         score += 30
@@ -138,8 +154,20 @@ def _score_candidate_url(href: str, card_name: str) -> int:
             break
     if any(word in lowered for word in ("blog", "pixnet", "dcard", "ptt.cc", "facebook", "youtube")):
         score -= 25
-    if normalize_card_query(card_name) and normalize_card_query(card_name) in lowered:
-        score += 10
+
+    norm_card = normalize_card_query(card_name)
+    ascii_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", card_name.lower()) if t not in ("card",)]
+    zh_tokens = re.findall(r"[\u4e00-\u9fff]{2,}", card_name.replace("信用卡", ""))
+    combined = f"{lowered} {snippet_lower}"
+    has_card_match = (
+        (norm_card and norm_card in normalize_card_query(combined))
+        or any(t in combined for t in ascii_tokens)
+        or any(t in combined for t in zh_tokens)
+    )
+    if not has_card_match:
+        return -50
+
+    score += 25
     return score
 
 
@@ -230,11 +258,11 @@ async def discover_official_url(
         ok, _ = validate_public_http_url(href)
         if not ok:
             continue
-        snippet_text = (await item.inner_text()).strip()
+        snippet_text = (await item.text_content() or "").strip()
         if detect_discontinued_marker(snippet_text) or detect_discontinued_marker(href):
             skipped_discontinued += 1
             continue
-        score = _score_candidate_url(href, card_name)
+        score = _score_candidate_url(href, card_name, snippet_text)
         if score > 0:
             candidates.append((score, href))
 

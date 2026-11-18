@@ -39,11 +39,11 @@ def list_available_scrapers() -> List[Dict[str, str]]:
 
 
 async def _launch_browser(p):
-    """Launch Playwright Chromium, falling back to system Google Chrome if bundled browser is absent."""
+    """Prefer system Google Chrome when present, falling back to Playwright bundled Chromium."""
     try:
-        return await p.chromium.launch(headless=True)
-    except Exception:
         return await p.chromium.launch(headless=True, channel="chrome")
+    except Exception:
+        return await p.chromium.launch(headless=True)
 
 
 async def run_scrapers(

@@ -249,10 +249,16 @@ TAIWAN_BANKS: List[Dict] = [
         "bank_code": "rakuten",
         "bank_name": "樂天信用卡",
         "domain_tokens": ["rakuten"],
-        "list_url": "https://www.card.rakuten.com.tw/",
+        "list_url": "https://www.card.rakuten.com.tw/corp/product/",
         "cards": [
-            {"card_name": "樂天信用卡", "official_url": ""},
-            {"card_name": "樂天 Panda J 卡", "official_url": ""},
+            {
+                "card_name": "樂天信用卡",
+                "official_url": "https://www.card.rakuten.com.tw/corp/product/",
+            },
+            {
+                "card_name": "樂天 Panda J 卡",
+                "official_url": "https://www.card.rakuten.com.tw/corp/product/",
+            },
             {"card_name": "樂天虎航聯名卡", "official_url": ""},
         ],
     },
@@ -385,6 +391,7 @@ NON_CARD_KEYWORDS = (
     "說明",
     "申請",
     "申辦",
+    "辦卡",
     "查詢",
     "更多",
     "介紹",
@@ -393,9 +400,17 @@ NON_CARD_KEYWORDS = (
     "服務",
     "比較",
     "升級為",
+    "公司卡",
 )
 
 NON_CARD_URL_TOKENS = (
+    "/auth",
+    "/signin",
+    "/member",
+    "/application",
+    "/apply",
+    "/ebank",
+    "/activation",
     "reportlost",
     "lostcard",
     "loan",
