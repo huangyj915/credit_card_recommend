@@ -80,10 +80,22 @@ TAIWAN_BANKS: List[Dict] = [
                 "card_name": "富邦 J 卡",
                 "official_url": "https://www.fubon.com/banking/personal/credit_card/all_card/jcard/jcard.htm",
             },
-            {"card_name": "富邦 Costco 聯名卡", "official_url": ""},
-            {"card_name": "富邦 momo 卡", "official_url": ""},
-            {"card_name": "Open Possible 聯名卡", "official_url": ""},
-            {"card_name": "尊御世界卡", "official_url": ""},
+            {
+                "card_name": "Costco 聯名卡",
+                "official_url": "https://www.fubon.com/banking/personal/credit_card/all_card/costco/costco.htm",
+            },
+            {
+                "card_name": "momo 卡",
+                "official_url": "https://www.fubon.com/banking/personal/credit_card/all_card/momo/momo.htm",
+            },
+            {
+                "card_name": "Open Possible 聯名卡",
+                "official_url": "https://www.fubon.com/banking/personal/credit_card/all_card/openpossible/openpossible.htm",
+            },
+            {
+                "card_name": "富邦尊御世界卡",
+                "official_url": "https://www.fubon.com/banking/personal/credit_card/all_card/imperial/imperial.htm",
+            },
         ],
     },
     {
@@ -335,6 +347,7 @@ GENERIC_NAV_LABELS = {
     "整併卡",
     "停發卡",
     "附卡",
+    "適用信用卡",
 }
 
 NON_CARD_KEYWORDS = (
@@ -606,6 +619,16 @@ async def discover_bank_cards_via_playwright(
                         const isNavChrome = (el) => Boolean(
                             el.closest("header, nav, footer, [role='navigation'], [class*='header'], [class*='footer'], [class*='nav']")
                         );
+                        const findCardBox = (el) => {
+                            let cur = el.parentElement;
+                            while (cur && cur !== document.body) {
+                                if (cur.matches("li, article, [class*='card-list'], [class*='list-box'], [class*='card-item'], [class*='card_item'], [class*='card-box'], [class*='product'], [class*='item'], [class*='box']")) {
+                                    if (cur.querySelector("a[href]")) return cur;
+                                }
+                                cur = cur.parentElement;
+                            }
+                            return el.closest("section");
+                        };
                         const pickCardHref = (el, cardBox) => {
                             const ownHref = el.getAttribute("href") || "";
                             if (ownHref && !ownHref.startsWith("#") && !ownHref.startsWith("javascript:")) {
@@ -623,14 +646,14 @@ async def discover_bank_cards_via_playwright(
                         };
 
                         const nodes = Array.from(
-                            document.querySelectorAll("main a, [role='main'] a, article a, [class*='card'] a, [class*='card'] h2, [class*='card'] h3, [class*='card'] h4, [class*='card-title'], [class*='card_name']")
-                        ).slice(0, 300);
+                            document.querySelectorAll("main a, [role='main'] a, article a, [class*='card'] a, [class*='card'] h2, [class*='card'] h3, [class*='card'] h4, [class*='card-title'], [class*='card_name'], [class*='list-box'] p[class*='title']")
+                        ).slice(0, 350);
 
                         return nodes
                             .filter((el) => !isNavChrome(el))
                             .map((el) => {
                                 const firstLine = (el.innerText || "").split(/\\r?\\n/)[0].trim();
-                                const cardBox = el.closest("li, article, [class*='card'], [class*='item'], [class*='box']");
+                                const cardBox = findCardBox(el);
                                 const href = pickCardHref(el, cardBox);
                                 const boxText = cardBox ? (cardBox.innerText || "").slice(0, 180) : "";
                                 const sectionHeading = el.closest("section")?.querySelector("h1, h2, h3")?.innerText || "";

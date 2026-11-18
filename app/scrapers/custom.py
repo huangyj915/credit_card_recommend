@@ -1,15 +1,22 @@
 """Custom user-specified credit card Playwright scraper and URL discovery."""
 
+import base64
 import hashlib
 import ipaddress
 from pathlib import Path
 import re
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 from playwright.async_api import Page, async_playwright
 
-from app.catalog import TAIWAN_BANK_HINTS, normalize_card_query
+from app.catalog import (
+    TAIWAN_BANKS,
+    TAIWAN_BANK_HINTS,
+    discover_bank_cards_via_playwright,
+    list_cards_for_bank,
+    normalize_card_query,
+)
 from app.db import list_cards, log_scrape, upsert_card
 from app.models import CardIn, CardOut, ScrapeResultItem
 from app.scrapers.base import (
@@ -136,6 +143,56 @@ def _score_candidate_url(href: str, card_name: str) -> int:
     return score
 
 
+def unwrap_search_result_url(href: str) -> str:
+    """Decode Bing /ck/a?...&u=a1<base64> redirect URLs to their actual destination."""
+    if not href:
+        return ""
+    parsed = urlparse(href)
+    if "bing.com" in (parsed.hostname or "").lower() and parsed.path.startswith("/ck/"):
+        encoded = parse_qs(parsed.query).get("u", [""])[0]
+        if encoded.startswith("a1") and len(encoded) > 2:
+            payload = encoded[2:]
+            payload += "=" * (-len(payload) % 4)
+            try:
+                decoded = base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8", errors="ignore")
+                if decoded.startswith(("http://", "https://")):
+                    return decoded
+            except Exception:
+                pass
+    return href
+
+
+def _match_bank_code_by_name(bank_name: Optional[str]) -> Optional[str]:
+    if not bank_name:
+        return None
+    norm = normalize_card_query(bank_name).replace("銀行", "")
+    if not norm:
+        return None
+    for bank in TAIWAN_BANKS:
+        b_norm = normalize_card_query(bank["bank_name"]).replace("銀行", "")
+        if norm == b_norm or norm in b_norm or b_norm in norm:
+            return bank["bank_code"]
+    return None
+
+
+def _lookup_catalog_url(card_name: str, bank_name: Optional[str], db_path: Optional[Path]) -> Optional[str]:
+    query = normalize_card_query(card_name)
+    if not query:
+        return None
+    bank_code = _match_bank_code_by_name(bank_name)
+    codes = [bank_code] if bank_code else [b["bank_code"] for b in TAIWAN_BANKS]
+    for code in codes:
+        if not code:
+            continue
+        for item in list_cards_for_bank(code, db_path=db_path) or []:
+            if not item.official_url:
+                continue
+            target = normalize_card_query(item.card_name)
+            if target and (target == query or target in query or query in target):
+                return item.official_url
+    return None
+
+
 async def discover_official_url(
     page: Page,
     card_name: str,
@@ -145,8 +202,8 @@ async def discover_official_url(
 
     Returns (url, error_reason). Stops immediately without bypassing if blocked.
     """
-    query = " ".join(part for part in [bank_name, card_name, "信用卡", "回饋"] if part).strip()
-    search_url = f"https://www.bing.com/search?q={query}"
+    query = " ".join(part for part in [bank_name, card_name, "信用卡"] if part).strip()
+    search_url = f"https://www.bing.com/search?q={quote_plus(query)}"
 
     try:
         await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
@@ -166,7 +223,8 @@ async def discover_official_url(
         anchor = item.locator("h2 a").first
         if await anchor.count() == 0:
             continue
-        href = await anchor.get_attribute("href")
+        raw_href = await anchor.get_attribute("href")
+        href = unwrap_search_result_url(raw_href or "")
         if not href:
             continue
         ok, _ = validate_public_http_url(href)
@@ -203,19 +261,21 @@ async def parse_generic_card_page(
     resolved_bank = infer_bank_name(official_url, title, bank_name)
     resolved_slug = card_slug or build_custom_card_slug(card_name, resolved_bank)
 
+    raw_texts = await page.evaluate(
+        """() => {
+            const nodes = Array.from(
+                document.querySelectorAll("section, article, li, tr, dd, [class*='benefit'], [class*='card'], [class*='reward'], [class*='promo'], [class*='info'], p")
+            ).slice(0, 300);
+            return nodes.map((el) => (el.innerText || "").replace(/\\s+/g, " ").trim());
+        }"""
+    )
+
     blocks: List[Dict[str, Optional[str]]] = []
     seen_texts = set()
-    candidates = page.locator(
-        "section, article, li, tr, [class*='benefit'], [class*='card'], "
-        "[class*='reward'], [class*='promo'], p"
-    )
-    count = min(await candidates.count(), 150)
-
     base_domestic = 0.5
     base_foreign = 0.5
 
-    for i in range(count):
-        text = re.sub(r"\s+", " ", (await candidates.nth(i).inner_text())).strip()
+    for text in raw_texts:
         if "%" not in text or len(text) < 6 or len(text) > 400 or text in seen_texts:
             continue
         seen_texts.add(text)
@@ -291,6 +351,14 @@ async def scrape_custom_card(
         target_slug = SCRAPER_REGISTRY[matched_code].card_slug
     elif not target_url and existing_card and existing_card.official_url:
         target_url = existing_card.official_url
+    elif not target_url:
+        target_url = _lookup_catalog_url(cleaned_name, cleaned_bank, db_path)
+
+    if not target_url and mode == "live":
+        bank_code_hint = _match_bank_code_by_name(cleaned_bank)
+        if bank_code_hint:
+            await discover_bank_cards_via_playwright(bank_code_hint, db_path=db_path)
+            target_url = _lookup_catalog_url(cleaned_name, cleaned_bank, db_path)
 
     if mode == "demo_html":
         if not matched_code:

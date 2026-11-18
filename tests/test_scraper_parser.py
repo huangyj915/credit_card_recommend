@@ -14,6 +14,7 @@ from app.scrapers.custom import (
     match_builtin_scraper_code,
     match_existing_card,
     parse_generic_card_page,
+    unwrap_search_result_url,
     validate_public_http_url,
 )
 from app.scrapers.manager import _launch_browser, run_scrapers
@@ -55,6 +56,12 @@ def test_custom_scraper_helpers_and_generic_parser(tmp_path):
     assert validate_public_http_url("https://www.dbs.com.tw/personal-zh/cards/eco")[0] is True
     assert validate_public_http_url("http://127.0.0.1:8000")[0] is False
     assert validate_public_http_url("file:///etc/passwd")[0] is False
+
+    bing_wrapped = "https://www.bing.com/ck/a?!&&p=123&u=a1aHR0cHM6Ly93d3cuZnVib24uY29tL2JhbmtpbmcvcGVyc29uYWwvY3JlZGl0X2NhcmQvYWxsX2NhcmQvb3BlbnBvc3NpYmxlL29wZW5wb3NzaWJsZS5odG0&ntb=1"
+    assert (
+        unwrap_search_result_url(bing_wrapped)
+        == "https://www.fubon.com/banking/personal/credit_card/all_card/openpossible/openpossible.htm"
+    )
 
     assert match_builtin_scraper_code("國泰 CUBE") == "cathay"
     assert match_builtin_scraper_code("U Bear 信用卡") == "esun"
