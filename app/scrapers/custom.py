@@ -291,10 +291,21 @@ async def parse_generic_card_page(
 
     raw_texts = await page.evaluate(
         """() => {
+            const root = document.querySelector("main, [role='main']") || document.body;
             const nodes = Array.from(
-                document.querySelectorAll("section, article, li, tr, dd, [class*='benefit'], [class*='card'], [class*='reward'], [class*='promo'], [class*='info'], p")
-            ).slice(0, 300);
-            return nodes.map((el) => (el.innerText || "").replace(/\\s+/g, " ").trim());
+                root.querySelectorAll("section, article, li, tr, dd, h2, h3, h4, h5, h6, [class*='benefit'], [class*='card'], [class*='reward'], [class*='promo'], [class*='info'], [class*='feature'], [class*='item'], p, div")
+            );
+            const out = [];
+            const seen = new Set();
+            for (const el of nodes) {
+                if (el.closest("header, nav, footer")) continue;
+                const text = (el.innerText || "").replace(/\\s+/g, " ").trim();
+                if (!text.includes("%") || text.length < 6 || text.length > 400 || seen.has(text)) continue;
+                seen.add(text);
+                out.push(text);
+                if (out.length >= 120) break;
+            }
+            return out;
         }"""
     )
 

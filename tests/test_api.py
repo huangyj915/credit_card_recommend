@@ -2,7 +2,7 @@
 
 from fastapi.testclient import TestClient
 
-from app.catalog import extract_card_candidates_from_links
+from app.catalog import extract_card_candidates_from_links, normalize_card_query
 from app.db import upsert_directory_cards
 from app.main import create_app
 
@@ -81,6 +81,12 @@ def test_api_flow(tmp_path):
 
         missing_bank = client.get("/api/banks/unknown-bank/cards")
         assert missing_bank.status_code == 404
+
+        assert normalize_card_query("玉山ＵBear信用卡") == normalize_card_query("玉山 U Bear 卡")
+        assert normalize_card_query("滙豐 Live+ 現金回饋卡") == normalize_card_query("匯豐 Live+ 現金回饋卡")
+        esun_names = [c["card_name"] for c in client.get("/api/banks/esun/cards").json()]
+        assert "玉山熊本熊卡" in esun_names
+        assert sum("bear" in normalize_card_query(n) for n in esun_names) == 1
 
 
 def test_extract_card_candidates_from_links():
