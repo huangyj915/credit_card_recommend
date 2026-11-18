@@ -1,0 +1,21 @@
+# Python virtual environments & bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test & tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local SQLite database
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# macOS & IDE files
+.DS_Store
+.vscode/
+.idea/

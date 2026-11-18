@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>台灣信用卡回饋比較 & 常用通路推薦系統</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="container hero-inner">
+      <div>
+        <span class="badge">Python + FastAPI + Playwright + SQLite</span>
+        <h1>台灣信用卡回饋比較 &amp; 通路推薦</h1>
+        <p class="subtitle">輸入你每個月在各通路的消費金額，系統自動精算回饋上限與切換方案，幫你找出最划算的「無腦單卡」與「多卡組合」。</p>
+      </div>
+      <div class="hero-actions">
+        <a href="/docs" target="_blank" class="btn btn-ghost">API 文件 (/docs)</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container main-grid">
+    <!-- Left Column: Spending Inputs -->
+    <section class="panel input-panel">
+      <div class="panel-header">
+        <h2>1. 設定你的每月常用通路消費</h2>
+        <p class="hint">可先點選下方情境範本，或直接輸入各通路每月花費（新台幣）</p>
+      </div>
+
+      <div class="preset-row">
+        <button type="button" class="chip" data-preset="office">🧋 小資外食網購族</button>
+        <button type="button" class="chip" data-preset="travel">✈️ 日本旅遊高消費族</button>
+        <button type="button" class="chip" data-preset="commuter">🚆 通勤超商日常族</button>
+        <button type="button" type="button" class="chip chip-muted" id="clearInputsBtn">清空歸零</button>
+      </div>
+
+      <form id="spendingForm">
+        <div id="channelsList" class="channels-list"></div>
+
+        <div class="options-box">
+          <label class="checkbox-label">
+            <input type="checkbox" id="onlyNoMinSpend" />
+            <span>僅顯示「無低消門檻」限制的卡片</span>
+          </label>
+          <div class="total-bar">
+            <span>每月預估總消費</span>
+            <strong id="totalSpendDisplay">NT$ 0</strong>
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block">開始推薦最適合我的信用卡</button>
+      </form>
+    </section>
+
+    <!-- Right Column: Tabs for Recommendations, Comparison Matrix, and Playwright Scraper -->
+    <section class="panel result-panel">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="recommend">🏆 推薦結果</button>
+        <button class="tab-btn" data-tab="matrix">📊 各卡通路比較表</button>
+        <button class="tab-btn" data-tab="scraper">🕷️ Playwright 爬蟲中心</button>
+      </div>
+
+      <!-- Tab 1: Recommendations -->
+      <div id="tab-recommend" class="tab-content active">
+        <div id="comboSection" class="combo-card hidden"></div>
+        <div id="recommendList" class="recommend-list">
+          <div class="empty-state">請在左側輸入你的每月通路消費，系統將自動計算推薦排名。</div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Comparison Matrix -->
+      <div id="tab-matrix" class="tab-content">
+        <div class="panel-header">
+          <h3>各家信用卡通路回饋總覽</h3>
+          <p class="hint">顯示目前資料庫中所有卡片於各標準化通路的最高回饋率（含方案切換或上限條件）</p>
+        </div>
+        <div class="table-wrap">
+          <table id="matrixTable" class="matrix-table"></table>
+        </div>
+      </div>
+
+      <!-- Tab 3: Playwright Scraper -->
+      <div id="tab-scraper" class="tab-content">
+        <div class="panel-header">
+          <h3>Playwright 銀行官網爬蟲控制台</h3>
+          <p class="hint">
+            銀行官網常有動態 JavaScript 渲染或版型差異。你可以選擇「即時爬取銀行官網」，或用「離線示範 HTML」測試 Playwright Chromium 的解析流程。
+          </p>
+        </div>
+
+        <div class="scraper-controls">
+          <div class="scraper-banks" id="scraperBanks"></div>
+          <div class="scraper-mode-row">
+            <label class="radio-label">
+              <input type="radio" name="scrapeMode" value="demo_html" checked />
+              <span>離線示範 HTML（啟動 Playwright Chromium 解析示範銀行頁面，最快且穩定）</span>
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="scrapeMode" value="live" />
+              <span>即時爬取銀行官網（實際連線至各銀行官網擷取）</span>
+            </label>
+          </div>
+          <button type="button" id="runScrapeBtn" class="btn btn-primary">啟動 Playwright 執行爬蟲</button>
+        </div>
+
+        <div id="scrapeResults" class="scrape-results"></div>
+
+        <div class="logs-section">
+          <h4>最近爬取紀錄 (SQLite scrape_logs)</h4>
+          <div id="scrapeLogs" class="scrape-logs"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <p>提醒：銀行信用卡權益與回饋上限經常調整，本網站內建之規則庫僅供試算參考，實際回饋請以各發卡銀行最新官網公告為準。</p>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
