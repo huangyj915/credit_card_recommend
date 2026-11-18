@@ -547,6 +547,41 @@ summary {
   margin-bottom: 14px;
 }
 
+.custom-scrape-box h4 {
+  margin: 0 0 6px;
+}
+
+.custom-scrape-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.custom-scrape-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.field-group input {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 400;
+  background: #fff;
+}
+
 .scrape-results {
   display: flex;
   flex-direction: column;

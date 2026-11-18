@@ -360,6 +360,26 @@ async function loadScrapersAndLogs() {
   }
 }
 
+async function handleScrapeResponse(data) {
+  document.getElementById("scrapeResults").innerHTML = (data.results || [])
+    .map(
+      (r) => `
+      <div class="scrape-item scrape-${escapeHtml(r.status)}">
+        <strong>${escapeHtml(r.bank_code)} (${escapeHtml(r.card_slug || "custom")})</strong>：${escapeHtml(r.message)}
+        ${r.url ? `<div class="card-sub">來源網址：<a href="${escapeHtml(r.url)}" target="_blank">${escapeHtml(r.url)}</a></div>` : ""}
+      </div>
+    `
+    )
+    .join("");
+
+  // Refresh cards and recommendation after scrape updates SQLite
+  const cardsRes = await fetch("/api/cards");
+  cardsData = await cardsRes.json();
+  renderMatrix();
+  await loadScrapersAndLogs();
+  await runRecommendation();
+}
+
 async function runScrape() {
   const btn = document.getElementById("runScrapeBtn");
   const selected = Array.from(document.querySelectorAll(".scraper-check:checked")).map(
@@ -381,25 +401,48 @@ async function runScrape() {
       body: JSON.stringify({ bank_codes: selected, mode }),
     });
     const data = await res.json();
-    document.getElementById("scrapeResults").innerHTML = data.results
-      .map(
-        (r) => `
-        <div class="scrape-item scrape-${escapeHtml(r.status)}">
-          <strong>${escapeHtml(r.bank_code)} (${escapeHtml(r.card_slug)})</strong>：${escapeHtml(r.message)}
-        </div>
-      `
-      )
-      .join("");
-
-    // Refresh cards and recommendation after scrape updates SQLite
-    const cardsRes = await fetch("/api/cards");
-    cardsData = await cardsRes.json();
-    renderMatrix();
-    await loadScrapersAndLogs();
-    await runRecommendation();
+    await handleScrapeResponse(data);
   } finally {
     btn.disabled = false;
     btn.textContent = "啟動 Playwright 執行爬蟲";
+  }
+}
+
+async function runCustomScrape(e) {
+  e.preventDefault();
+  const btn = document.getElementById("runCustomScrapeBtn");
+  const cardName = document.getElementById("customCardName").value.trim();
+  const bankName = document.getElementById("customBankName").value.trim();
+  const officialUrl = document.getElementById("customCardUrl").value.trim();
+
+  if (!cardName) {
+    alert("請輸入想爬取的信用卡名稱。");
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "Playwright 搜尋與解析中...";
+
+  try {
+    const res = await fetch("/api/scrape/custom", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        card_name: cardName,
+        bank_name: bankName || null,
+        official_url: officialUrl || null,
+        mode: "live",
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.detail || "自訂爬取失敗");
+      return;
+    }
+    await handleScrapeResponse(data);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "依卡名啟動 Playwright 爬取";
   }
 }
 
@@ -442,6 +485,7 @@ async function init() {
 
   document.getElementById("onlyNoMinSpend").addEventListener("change", runRecommendation);
   document.getElementById("runScrapeBtn").addEventListener("click", runScrape);
+  document.getElementById("customScrapeForm").addEventListener("submit", runCustomScrape);
 
   // Default preset on load so user immediately sees rich recommendations
   applyPreset("office");

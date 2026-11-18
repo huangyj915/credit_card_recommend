@@ -13,12 +13,14 @@ from app.db import get_card_by_slug, init_db, list_cards, list_scrape_logs, upse
 from app.models import (
     CardIn,
     CardOut,
+    CustomScrapeRequest,
     RecommendRequest,
     RecommendResponse,
     ScrapeRequest,
     ScrapeResponse,
 )
 from app.recommender import recommend_cards
+from app.scrapers.custom import scrape_custom_card
 from app.scrapers.manager import list_available_scrapers, run_scrapers
 from app.seed_data import ensure_seed_data
 
@@ -105,6 +107,21 @@ def create_app(db_path: Optional[Path] = None) -> FastAPI:
             db_path=application.state.db_path,
         )
         return ScrapeResponse(mode=request.mode, results=results)
+
+    @application.post("/api/scrape/custom", response_model=ScrapeResponse)
+    async def trigger_custom_scrape(request: CustomScrapeRequest) -> ScrapeResponse:
+        if request.mode not in ("live", "demo_html"):
+            raise HTTPException(status_code=400, detail="mode must be 'live' or 'demo_html'")
+        if not request.card_name.strip():
+            raise HTTPException(status_code=400, detail="card_name must not be empty")
+        result = await scrape_custom_card(
+            card_name=request.card_name,
+            bank_name=request.bank_name,
+            official_url=request.official_url,
+            mode=request.mode,
+            db_path=application.state.db_path,
+        )
+        return ScrapeResponse(mode=request.mode, results=[result])
 
     return application
 

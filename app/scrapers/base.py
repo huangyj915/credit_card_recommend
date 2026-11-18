@@ -36,7 +36,7 @@ def extract_percentage(text: str) -> Optional[float]:
 def extract_monthly_cap(text: str) -> Optional[float]:
     """Extract monthly reward cap in NTD from phrases like '上限500元' or '每月最高300點'."""
     patterns = [
-        r"(?:上限|最高)[^\d]{0,8}(\d{1,3}(?:,\d{3})*|\d+)\s*(?:元|點|ntd)?",
+        r"(?:上限|最高)[^\d%]{0,8}(\d{1,3}(?:,\d{3})*|\d+)(?!\s*(?:\d|\.|%))\s*(?:元|點|ntd)?",
         r"(\d{1,3}(?:,\d{3})*|\d+)\s*(?:元|點)\s*(?:/月|每月|上限)",
     ]
     for pattern in patterns:

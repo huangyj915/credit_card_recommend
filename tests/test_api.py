@@ -38,3 +38,18 @@ def test_api_flow(tmp_path):
         page = client.get("/")
         assert page.status_code == 200
         assert "台灣信用卡回饋比較" in page.text
+
+        custom_bad = client.post(
+            "/api/scrape/custom",
+            json={"card_name": "測試卡", "official_url": "http://127.0.0.1:8000", "mode": "live"},
+        )
+        assert custom_bad.status_code == 200
+        assert custom_bad.json()["results"][0]["status"] == "error"
+
+        custom_builtin = client.post(
+            "/api/scrape/custom",
+            json={"card_name": "CUBE 卡", "mode": "demo_html"},
+        )
+        assert custom_builtin.status_code == 200
+        assert custom_builtin.json()["results"][0]["status"] == "success"
+        assert custom_builtin.json()["results"][0]["card_slug"] == "cathay-cube"

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>台灣信用卡回饋比較 & 常用通路推薦系統</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2" />
+  <link rel="stylesheet" href="/static/styles.css?v=3" />
 </head>
 <body>
   <header class="hero">
@@ -104,6 +104,30 @@
           <button type="button" id="runScrapeBtn" class="btn btn-primary">啟動 Playwright 執行爬蟲</button>
         </div>
 
+        <div class="scraper-controls custom-scrape-box">
+          <h4>指定卡片名稱爬取（支援新卡片或自訂官網）</h4>
+          <p class="hint">
+            輸入你想爬的信用卡名稱（例如：<code>富邦 J 卡</code>、<code>星展 eco 永續卡</code>、<code>CUBE 卡</code>）；若留空網址，系統會優先比對內建/資料庫網址或用 Playwright 搜尋定位官網。
+          </p>
+          <form id="customScrapeForm" class="custom-scrape-form">
+            <div class="custom-scrape-grid">
+              <label class="field-group">
+                <span>信用卡名稱 *</span>
+                <input type="text" id="customCardName" placeholder="例：富邦 J 卡 / 星展 eco 永續卡" required />
+              </label>
+              <label class="field-group">
+                <span>發卡銀行（選填）</span>
+                <input type="text" id="customBankName" placeholder="例：台北富邦 / 星展銀行" />
+              </label>
+            </div>
+            <label class="field-group">
+              <span>官方介紹頁網址（選填，直接指定最準確）</span>
+              <input type="url" id="customCardUrl" placeholder="https://..." />
+            </label>
+            <button type="submit" id="runCustomScrapeBtn" class="btn btn-primary">依卡名啟動 Playwright 爬取</button>
+          </form>
+        </div>
+
         <div id="scrapeResults" class="scrape-results"></div>
 
         <div class="logs-section">
@@ -120,6 +144,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>

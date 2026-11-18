@@ -136,6 +136,13 @@ class ScrapeRequest(BaseModel):
     )
 
 
+class CustomScrapeRequest(BaseModel):
+    card_name: str = Field(..., min_length=1, max_length=100, description="Target credit card name")
+    bank_name: Optional[str] = Field(None, max_length=60, description="Optional issuing bank name")
+    official_url: Optional[str] = Field(None, max_length=500, description="Optional official card URL")
+    mode: str = Field(default="live", description="'live' or 'demo_html'")
+
+
 class ScrapeResultItem(BaseModel):
     bank_code: str
     card_slug: str
