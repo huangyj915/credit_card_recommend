@@ -26,7 +26,7 @@
 ## 二、專案目錄結構
 
 ```text
-credit_card_recommand/
+credit_card_recommend/
 ├── app/
 │   ├── main.py              # FastAPI 主程式與 API 路由
 │   ├── channels.py          # 台灣 10 大常用消費通路標準定義
