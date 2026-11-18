@@ -20,6 +20,7 @@ def test_switchable_plan_selects_best_plan(tmp_path):
     cube = next(r for r in resp.recommendations if r.card_slug == "cathay-cube")
     assert cube.recommended_plan == "趣旅行"
     assert cube.total_reward_ntd == 900.0
+    assert cube.last_updated != ""
 
 
 def test_monthly_cap_and_excess_base_rate(tmp_path):

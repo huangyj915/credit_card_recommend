@@ -180,6 +180,7 @@ def evaluate_card(
         annual_fee=card.annual_fee,
         reward_unit=card.reward_unit,
         source_type=card.source_type,
+        last_updated=card.last_updated,
         recommended_plan=best_plan,
         total_spend_ntd=total_spend,
         total_reward_ntd=best_reward,

@@ -52,6 +52,37 @@ function escapeHtml(text) {
     .replaceAll('"', "&quot;");
 }
 
+function formatLastUpdated(raw) {
+  const value = String(raw ?? "").trim();
+  if (!value) {
+    return { dateText: "未標註", fullText: "尚無更新紀錄" };
+  }
+
+  const utcMatch = value.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) UTC$/);
+  const parsed = utcMatch ? new Date(`${utcMatch[1]}T${utcMatch[2]}Z`) : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return { dateText: value, fullText: `最後更新：${value}` };
+  }
+
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Taipei",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    })
+      .formatToParts(parsed)
+      .map((p) => [p.type, p.value])
+  );
+  const dateText = `${parts.year}-${parts.month}-${parts.day}`;
+  const fullText = `最後更新：${dateText} ${parts.hour}:${parts.minute}:${parts.second}（台灣時間）`;
+  return { dateText, fullText };
+}
+
 function getSpendingPayload() {
   const spending = {};
   document.querySelectorAll(".channel-input").forEach((input) => {
@@ -154,6 +185,8 @@ function renderRecommendations(data) {
         rec.source_type === "scraped"
           ? `<span class="source-pill source-scraped">Playwright 爬取</span>`
           : `<span class="source-pill source-seed">範例規則庫</span>`;
+      const updated = formatLastUpdated(rec.last_updated);
+      const dateBadge = `<span class="date-pill" title="${escapeHtml(updated.fullText)}">資料更新：${escapeHtml(updated.dateText)}</span>`;
       const planBadge = rec.recommended_plan
         ? `<span class="plan-pill">建議切換方案：${escapeHtml(rec.recommended_plan)}</span>`
         : "";
@@ -183,6 +216,7 @@ function renderRecommendations(data) {
               <div>
                 <span class="rank-pill">第 ${rank} 名</span>
                 ${sourceBadge}
+                ${dateBadge}
                 ${planBadge}
               </div>
               <h3 class="card-name">${escapeHtml(rec.bank_name)} ${escapeHtml(rec.card_name)}</h3>
@@ -245,11 +279,13 @@ function renderMatrix() {
         })
         .join("");
 
+      const updated = formatLastUpdated(card.last_updated);
       return `
         <tr>
           <td>
             <strong>${escapeHtml(card.bank_name)} ${escapeHtml(card.card_name)}</strong>
             <br><small>${card.source_type === "scraped" ? "Playwright 爬取" : "範例規則庫"}</small>
+            <br><small class="card-updated" title="${escapeHtml(updated.fullText)}">更新：${escapeHtml(updated.dateText)}</small>
           </td>
           ${cells}
         </tr>
@@ -290,16 +326,20 @@ async function loadScrapersAndLogs() {
   const scrapers = await scrapersRes.json();
   const logs = await logsRes.json();
 
+  const cardBySlug = Object.fromEntries(cardsData.map((c) => [c.card_slug, c]));
   document.getElementById("scraperBanks").innerHTML = scrapers
-    .map(
-      (s) => `
+    .map((s) => {
+      const card = cardBySlug[s.card_slug];
+      const updated = card ? formatLastUpdated(card.last_updated) : null;
+      return `
       <label class="scraper-bank-card">
         <input type="checkbox" class="scraper-check" value="${escapeHtml(s.bank_code)}" checked />
         <strong>${escapeHtml(s.bank_name)} ${escapeHtml(s.card_name)}</strong>
         <div class="card-sub">代碼：${escapeHtml(s.bank_code)}</div>
+        ${updated ? `<div class="card-sub" title="${escapeHtml(updated.fullText)}">資料更新：${escapeHtml(updated.dateText)}</div>` : ""}
       </label>
-    `
-    )
+    `;
+    })
     .join("");
 
   const logsEl = document.getElementById("scrapeLogs");

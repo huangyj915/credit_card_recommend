@@ -89,6 +89,7 @@ class CardRecommendation(BaseModel):
     annual_fee: str
     reward_unit: str
     source_type: str
+    last_updated: str = ""
     recommended_plan: Optional[str] = None
     total_spend_ntd: float
     total_reward_ntd: float

@@ -20,7 +20,9 @@ def test_api_flow(tmp_path):
 
         cards = client.get("/api/cards")
         assert cards.status_code == 200
-        assert len(cards.json()) >= 6
+        cards_json = cards.json()
+        assert len(cards_json) >= 6
+        assert all(c["last_updated"] for c in cards_json)
 
         rec = client.post(
             "/api/recommend",
@@ -30,6 +32,7 @@ def test_api_flow(tmp_path):
         data = rec.json()
         assert data["total_spend_ntd"] == 9000.0
         assert len(data["recommendations"]) >= 6
+        assert all(r["last_updated"] for r in data["recommendations"])
         assert data["combo"] is not None
 
         page = client.get("/")
