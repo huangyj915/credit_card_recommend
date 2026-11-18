@@ -1,51 +1,68 @@
 # 台灣信用卡回饋比較與常用通路推薦系統
 
-使用 **Python + FastAPI + Playwright + SQLite** 打造的個人化信用卡比較網站。  
-只要輸入你每個月在「超商、餐飲、外送、網購、行動支付、旅遊、海外」等通路的花費，系統就會自動精算**每月上限、低消門檻與方案切換**，幫你算出最划算的**單卡排行**與**多卡分刷組合**。
+使用 **Python + FastAPI + Playwright + SQLite** 打造的個人化台灣信用卡回饋試算與比較網站。  
+使用者只需輸入每月在「超商、餐飲、外送、網購、行動支付、超市量販、交通、旅遊、海外」等 10 大通路的消費金額，系統即可自動精算**低消門檻、每月回饋上限與切換方案最佳化**，產出**單卡排行**與**多卡分刷最佳組合**，並內建 Playwright 爬蟲中心以更新銀行信用卡規則與目錄。
 
 ---
 
-## 一、給新手的前後端架構白話說明
+## 核心功能與技術亮點
 
-你提到原本只聽過在 Python 用 Playwright，對網頁前後端還沒有概念。這個專案採用**全 Python 即可啟動、零複雜前端編譯工具（不需 Node.js / React）**的標準架構：
-
-1. **Playwright 爬蟲層（資料採集）— [`app/scrapers/`](app/scrapers/)**
-   - 就像你寫的自動開瀏覽器程式一樣，用無頭瀏覽器（Chromium）打開銀行官網頁面，把文字與回饋比率抓下來，整理成結構化資料存進資料庫。
-2. **SQLite 資料庫（資料儲存）— [`app/db.py`](app/db.py)**
-   - 一個輕量級的單一檔案資料庫（`data/cards.db`），不需要另外安裝 MySQL/PostgreSQL，用來保存各張信用卡規則、優惠上限與爬蟲紀錄。
-3. **Python 後端伺服器（大腦與計算）— [`app/main.py`](app/main.py) & [`app/recommender.py`](app/recommender.py)**
-   - 使用 **FastAPI** 框架，負責：
-     - 提供網頁給瀏覽器看（`GET /`）
-     - 接收使用者輸入的消費金額，計算每張卡實得回饋並排序（`POST /api/recommend`）
-     - 接受前端按鈕觸發，啟動 Playwright 執行爬蟲（`POST /api/scrape`）
-4. **網站前端介面（使用者畫面）— [`static/`](static/)**
-   - 由單純的 `index.html`、`styles.css`、`app.js` 組成，負責把表單、卡片排行榜、比較表格畫在瀏覽器上，並透過 `fetch()` 向 Python 後端拿計算結果。
+- **個人化回饋精算與多卡組合引擎（[recommender.py](app/recommender.py)）**
+  - 支援 10 大標準化台灣消費通路（[channels.py](app/channels.py)）及一鍵情境範本（小資外食網購族、日本旅遊高消費族、通勤超商日常族）。
+  - 自動計算最低消費門檻、每月回饋上限（超過上限部分改計基本回饋率），以及權益切換型信用卡（如國泰 CUBE 卡）之最佳方案自動試算。
+  - 提供「無低消門檻」篩選，並計算「最佳多卡分刷組合」相較最佳單卡的額外省錢金額。
+- **Playwright 銀行爬蟲與卡片目錄系統（[scrapers/](app/scrapers/)、[catalog.py](app/catalog.py)）**
+  - **銀行專屬爬蟲**：內建國泰、玉山、台新示範與即時官網解析，支援離線 `demo_html` 測試與 `live` 爬取兩種模式。
+  - **台灣發卡行連動選單與自訂爬取**：收錄 21 家台灣主要發卡銀行與實測有效的熱門卡介紹頁網址，支援透過 Playwright 從銀行官網總覽頁擷取更多卡片並合併至資料庫目錄。
+  - **資料品質與防護機制**：過濾停發／停止申辦卡片、非卡片導覽／服務頁連結（如掛失、登入、辦卡頁），正規化全形與異體字（`NFKC`、`滙/匯`）以避免重複收錄，並檢查自訂網址避免存取內部位址。
+- **資料持久化與更新標注（[db.py](app/db.py)、[static/](static/)）**
+  - 以 SQLite 保存信用卡規則、官網擷取卡片目錄與 `scrape_logs` 執行紀錄。
+  - 推薦結果、通路比較表與爬蟲中心皆顯示每張卡最新資料的更新日期（台灣時間）。
 
 ---
 
-## 二、專案目錄結構
+## 系統架構
+
+```mermaid
+flowchart LR
+    UI["Web UI (HTML / CSS / JS)"] <-->|REST JSON| API["FastAPI (app/main.py)"]
+    API --> REC["推薦精算引擎 (recommender.py)"]
+    API --> CAT["銀行與卡片目錄 (catalog.py)"]
+    API --> SCR["Playwright 爬蟲調度 (scrapers/)"]
+    REC <--> DB["SQLite (data/cards.db)"]
+    CAT <--> DB
+    SCR -->|Chromium 解析與寫入| DB
+```
+
+---
+
+## 專案目錄結構
 
 ```text
 credit_card_recommend/
 ├── app/
-│   ├── main.py              # FastAPI 主程式與 API 路由
-│   ├── channels.py          # 台灣 10 大常用消費通路標準定義
-│   ├── models.py            # 資料結構驗證（Pydantic）
-│   ├── db.py                # SQLite 資料庫讀寫
-│   ├── seed_data.py         # 6 張台灣熱門卡開箱範例規則庫
-│   ├── recommender.py       # 回饋精算（上限/門檻/方案切換/多卡組合）
+│   ├── main.py              # FastAPI 應用入口與 API 路由
+│   ├── models.py            # Pydantic 請求與回應資料模型
+│   ├── channels.py          # 台灣 10 大常用消費通路定義
+│   ├── db.py                # SQLite 資料表初始化與讀寫
+│   ├── seed_data.py         # 開箱即用之台灣熱門信用卡預設規則庫
+│   ├── recommender.py       # 單卡評分、方案切換最佳化與多卡分刷組合演算法
+│   ├── catalog.py           # 台灣發卡行目錄、官網卡名擷取與有效卡片過濾
 │   └── scrapers/
-│       ├── base.py          # Playwright 共用基底與中文規則解析器
-│       ├── manager.py       # 爬蟲調度器（支援即時官網 & 離線示範 HTML）
-│       └── banks/           # 各銀行專屬爬蟲（國泰、玉山、台新）
-├── static/                  # 前端網頁（HTML / CSS / JS）
-├── tests/                   # 推薦邏輯、Playwright 爬蟲與 API 自動化測試
+│       ├── base.py          # Playwright 共用基底、中文規則解析與停發偵測
+│       ├── manager.py       # 預設銀行爬蟲調度器（live / demo_html）
+│       ├── custom.py        # 依自訂卡名／網址定位並爬取解析模組
+│       └── banks/           # 各銀行專用爬蟲（國泰、玉山、台新）
+├── static/                  # 原生前端介面（index.html / styles.css / app.js）
+├── tests/                   # 推薦引擎、API 端點與 Playwright 解析自動化測試
+├── Dockerfile               # 含 Playwright Chromium 的容器部署設定
+├── render.yaml              # Render 雲端一鍵部署設定檔
 └── requirements.txt
 ```
 
 ---
 
-## 三、安裝與啟動步驟
+## 本機安裝與啟動
 
 ### 1. 建立虛擬環境並安裝套件
 
@@ -56,15 +73,15 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. 啟動網站
+### 2. 啟動服務
 
 ```bash
 .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
-啟動後打開瀏覽器前往：
-- **網站主畫面**：http://127.0.0.1:8000
-- **自動產生的 API 互動文件**：http://127.0.0.1:8000/docs
+啟動後於瀏覽器開啟：
+- **網站主畫面**：`http://127.0.0.1:8000`
+- **API 互動文件（Swagger UI）**：`http://127.0.0.1:8000/docs`
 
 ### 3. 執行自動化測試
 
@@ -72,13 +89,27 @@ playwright install chromium
 .venv/bin/pytest -v
 ```
 
+測試涵蓋：
+- 推薦引擎（方案切換最佳化、月回饋上限與超額基本回饋、低消門檻過濾、多卡組合效益）
+- FastAPI 端點與台灣銀行／卡片目錄過濾
+- Playwright 離線 HTML 解析、通用頁面解析與停發卡偵測
+
 ---
 
-## 四、如何新增下一家銀行的 Playwright 爬蟲？
+## Docker 與雲端部署（Live Demo）
 
-1. 在 `app/scrapers/banks/` 新增檔案（例如 `fubon.py`），繼承 `BaseBankScraper`。
-2. 填入 `bank_code`、`bank_name`、`card_name`、`card_slug`、`official_url`。
-3. 在 `parse_page(self, page, source_type)` 中使用 Playwright `page.locator(...)` 擷取頁面上包含 `%` 與通路關鍵字的區塊，呼叫 `build_rules_from_blocks(...)` 即可自動轉換成標準化通路規則。
-4. 到 `app/scrapers/manager.py` 的 `SCRAPER_REGISTRY` 註冊新銀行代碼，前端「Playwright 爬蟲中心」就會自動出現該銀行的勾選項目！
+本專案已提供 [Dockerfile](Dockerfile) 與 [render.yaml](render.yaml)，可直接部署至支援 Docker 的雲端平台（如 **Render**、**Zeabur**、**Railway**、**Fly.io**）：
 
-> **免責聲明**：各家銀行信用卡回饋率、每月上限與排除項目會隨活動檔期異動，本系統內建規則僅供試算與開發範本參考，實際消費請以發卡銀行最新公告為準。
+### 本機使用 Docker 驗證
+
+```bash
+docker build -t credit-card-recommend .
+docker run --rm -p 8000:8000 credit-card-recommend
+```
+
+### 部署至 Render（免費方案）
+1. 登入 [Render](https://render.com/)，選擇 **New + → Blueprint**（或 **Web Service**）。
+2. 連接此 GitHub Repository（`credit_card_recommend`）。
+3. Render 會自動偵測 `render.yaml` 與 `Dockerfile` 並執行建置與健康檢查（`/api/health`）。
+
+> **雲端 Demo 環境提醒**：免費方案容器記憶體較小且閒置會休眠，推薦試算、比較表與 `demo_html` 示範爬蟲可穩定運行；即時爬取銀行官網（`live`）在部分雲端機房 IP 可能受銀行防爬蟲策略或連線逾時限制。各家銀行信用卡權益與回饋上限請以發卡銀行最新官方公告為準。

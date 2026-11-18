@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: credit-card-recommend
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
