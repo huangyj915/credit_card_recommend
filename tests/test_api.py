@@ -141,3 +141,54 @@ def test_discontinued_cards_excluded_from_catalog_and_custom_scrape(tmp_path):
         item = res.json()["results"][0]
         assert item["status"] == "warning"
         assert "停發" in item["message"]
+
+
+def test_admin_token_and_public_readonly_modes(tmp_path):
+    # 1. Admin token + disabled docs mode
+    admin_app = create_app(
+        db_path=tmp_path / "admin.db",
+        admin_token="secret-pw",
+        disable_docs=True,
+    )
+    with TestClient(admin_app) as client:
+        cfg = client.get("/api/config").json()
+        assert cfg == {
+            "admin_protected": True,
+            "public_readonly": False,
+            "docs_enabled": False,
+        }
+        assert client.get("/docs").status_code == 404
+        assert client.post("/api/recommend", json={"monthly_spending": {"dining": 1000}}).status_code == 200
+
+        assert client.post("/api/scrape", json={"bank_codes": ["cathay"], "mode": "demo_html"}).status_code == 403
+        assert (
+            client.post(
+                "/api/scrape",
+                json={"bank_codes": ["cathay"], "mode": "demo_html"},
+                headers={"X-Admin-Token": "wrong"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/api/scrape/custom",
+                json={"card_name": "CUBE 卡", "mode": "demo_html"},
+            ).status_code
+            == 403
+        )
+        assert client.post("/api/banks/fubon/discover").status_code == 403
+
+        ok_res = client.post(
+            "/api/scrape",
+            json={"bank_codes": ["cathay"], "mode": "demo_html"},
+            headers={"X-Admin-Token": "secret-pw"},
+        )
+        assert ok_res.status_code == 200
+        assert ok_res.json()["results"][0]["status"] == "success"
+
+    # 2. Pure public readonly mode
+    ro_app = create_app(db_path=tmp_path / "readonly.db", public_readonly=True)
+    with TestClient(ro_app) as client:
+        assert client.get("/api/config").json()["public_readonly"] is True
+        assert client.post("/api/recommend", json={"monthly_spending": {"dining": 1000}}).status_code == 200
+        assert client.post("/api/scrape", json={"bank_codes": ["cathay"], "mode": "demo_html"}).status_code == 403

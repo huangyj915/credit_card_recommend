@@ -1,7 +1,9 @@
 """Playwright scraper orchestrator and registry."""
 
+import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
+from weakref import WeakKeyDictionary
 
 from playwright.async_api import async_playwright
 
@@ -38,6 +40,19 @@ def list_available_scrapers() -> List[Dict[str, str]]:
     ]
 
 
+_PLAYWRIGHT_SEMAPHORES: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = WeakKeyDictionary()
+
+
+def get_playwright_semaphore() -> asyncio.Semaphore:
+    """Return a per-event-loop semaphore limiting Playwright to 1 concurrent browser."""
+    loop = asyncio.get_running_loop()
+    sem = _PLAYWRIGHT_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(1)
+        _PLAYWRIGHT_SEMAPHORES[loop] = sem
+    return sem
+
+
 async def _launch_browser(p):
     """Prefer system Google Chrome when present, falling back to Playwright bundled Chromium."""
     try:
@@ -54,131 +69,132 @@ async def run_scrapers(
     """Execute selected bank Playwright scrapers and update SQLite on success."""
     results: List[ScrapeResultItem] = []
 
-    async with async_playwright() as p:
-        browser = await _launch_browser(p)
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            locale="zh-TW",
-            viewport={"width": 1280, "height": 900},
-        )
+    async with get_playwright_semaphore():
+        async with async_playwright() as p:
+            browser = await _launch_browser(p)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                locale="zh-TW",
+                viewport={"width": 1280, "height": 900},
+            )
 
-        try:
-            for code in bank_codes:
-                scraper = SCRAPER_REGISTRY.get(code)
-                if scraper is None:
-                    results.append(
-                        ScrapeResultItem(
-                            bank_code=code,
-                            card_slug="",
-                            status="error",
-                            message=f"未知的銀行爬蟲代碼: {code}",
-                        )
-                    )
-                    continue
-
-                page = await context.new_page()
-                try:
-                    if mode == "demo_html":
-                        card_data = await scraper.scrape_demo_html(page)
-                    else:
-                        card_data = await scraper.scrape_live(page)
-
-                    discontinued_reason = await check_page_discontinued(page, scraper.official_url)
-                    if discontinued_reason:
-                        msg = (
-                            f"偵測到「{scraper.bank_name} {scraper.card_name}」疑似已停發或停止申辦"
-                            f"（{discontinued_reason}），已略過不更新。"
-                        )
-                        log_scrape(
-                            bank_code=code,
-                            card_slug=scraper.card_slug,
-                            url=scraper.official_url,
-                            status="warning",
-                            message=msg,
-                            rules_count=0,
-                            db_path=db_path,
-                        )
+            try:
+                for code in bank_codes:
+                    scraper = SCRAPER_REGISTRY.get(code)
+                    if scraper is None:
                         results.append(
                             ScrapeResultItem(
                                 bank_code=code,
-                                card_slug=scraper.card_slug,
-                                status="warning",
-                                message=msg,
-                                rules_count=0,
-                                url=scraper.official_url,
+                                card_slug="",
+                                status="error",
+                                message=f"未知的銀行爬蟲代碼: {code}",
                             )
                         )
                         continue
 
-                    if not card_data.rules:
-                        msg = "頁面已開啟但未解析出結構化回饋規則（可能因官網改版、JS 動態載入或 WAF 阻擋），已保留既有資料。"
+                    page = await context.new_page()
+                    try:
+                        if mode == "demo_html":
+                            card_data = await scraper.scrape_demo_html(page)
+                        else:
+                            card_data = await scraper.scrape_live(page)
+
+                        discontinued_reason = await check_page_discontinued(page, scraper.official_url)
+                        if discontinued_reason:
+                            msg = (
+                                f"偵測到「{scraper.bank_name} {scraper.card_name}」疑似已停發或停止申辦"
+                                f"（{discontinued_reason}），已略過不更新。"
+                            )
+                            log_scrape(
+                                bank_code=code,
+                                card_slug=scraper.card_slug,
+                                url=scraper.official_url,
+                                status="warning",
+                                message=msg,
+                                rules_count=0,
+                                db_path=db_path,
+                            )
+                            results.append(
+                                ScrapeResultItem(
+                                    bank_code=code,
+                                    card_slug=scraper.card_slug,
+                                    status="warning",
+                                    message=msg,
+                                    rules_count=0,
+                                    url=scraper.official_url,
+                                )
+                            )
+                            continue
+
+                        if not card_data.rules:
+                            msg = "頁面已開啟但未解析出結構化回饋規則（可能因官網改版、JS 動態載入或 WAF 阻擋），已保留既有資料。"
+                            log_scrape(
+                                bank_code=code,
+                                card_slug=scraper.card_slug,
+                                url=scraper.official_url,
+                                status="warning",
+                                message=msg,
+                                rules_count=0,
+                                db_path=db_path,
+                            )
+                            results.append(
+                                ScrapeResultItem(
+                                    bank_code=code,
+                                    card_slug=scraper.card_slug,
+                                    status="warning",
+                                    message=msg,
+                                    rules_count=0,
+                                    url=scraper.official_url,
+                                )
+                            )
+                            continue
+
+                        upsert_card(card_data, db_path=db_path)
+                        msg = f"成功透過 Playwright ({mode}) 解析並更新 {len(card_data.rules)} 條通路規則"
                         log_scrape(
                             bank_code=code,
                             card_slug=scraper.card_slug,
                             url=scraper.official_url,
-                            status="warning",
-                            message=msg,
-                            rules_count=0,
-                            db_path=db_path,
-                        )
-                        results.append(
-                            ScrapeResultItem(
-                                bank_code=code,
-                                card_slug=scraper.card_slug,
-                                status="warning",
-                                message=msg,
-                                rules_count=0,
-                                url=scraper.official_url,
-                            )
-                        )
-                        continue
-
-                    upsert_card(card_data, db_path=db_path)
-                    msg = f"成功透過 Playwright ({mode}) 解析並更新 {len(card_data.rules)} 條通路規則"
-                    log_scrape(
-                        bank_code=code,
-                        card_slug=scraper.card_slug,
-                        url=scraper.official_url,
-                        status="success",
-                        message=msg,
-                        rules_count=len(card_data.rules),
-                        db_path=db_path,
-                    )
-                    results.append(
-                        ScrapeResultItem(
-                            bank_code=code,
-                            card_slug=scraper.card_slug,
                             status="success",
                             message=msg,
                             rules_count=len(card_data.rules),
-                            url=scraper.official_url,
+                            db_path=db_path,
                         )
-                    )
-                except Exception as exc:
-                    msg = f"爬取失敗：{type(exc).__name__}: {str(exc)[:180]}"
-                    log_scrape(
-                        bank_code=code,
-                        card_slug=scraper.card_slug,
-                        url=scraper.official_url,
-                        status="error",
-                        message=msg,
-                        rules_count=0,
-                        db_path=db_path,
-                    )
-                    results.append(
-                        ScrapeResultItem(
+                        results.append(
+                            ScrapeResultItem(
+                                bank_code=code,
+                                card_slug=scraper.card_slug,
+                                status="success",
+                                message=msg,
+                                rules_count=len(card_data.rules),
+                                url=scraper.official_url,
+                            )
+                        )
+                    except Exception as exc:
+                        msg = f"爬取失敗：{type(exc).__name__}: {str(exc)[:180]}"
+                        log_scrape(
                             bank_code=code,
                             card_slug=scraper.card_slug,
+                            url=scraper.official_url,
                             status="error",
                             message=msg,
                             rules_count=0,
-                            url=scraper.official_url,
+                            db_path=db_path,
                         )
-                    )
-                finally:
-                    await page.close()
-        finally:
-            await context.close()
-            await browser.close()
+                        results.append(
+                            ScrapeResultItem(
+                                bank_code=code,
+                                card_slug=scraper.card_slug,
+                                status="error",
+                                message=msg,
+                                rules_count=0,
+                                url=scraper.official_url,
+                            )
+                        )
+                    finally:
+                        await page.close()
+            finally:
+                await context.close()
+                await browser.close()
 
     return results

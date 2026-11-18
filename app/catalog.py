@@ -15,7 +15,7 @@ from app.db import (
 )
 from app.models import BankCardCatalogItem, BankCatalogItem, BankDiscoverResponse
 from app.scrapers.base import detect_discontinued_marker
-from app.scrapers.manager import USER_AGENT, _launch_browser
+from app.scrapers.manager import USER_AGENT, _launch_browser, get_playwright_semaphore
 
 # Curated Taiwan issuing banks and representative credit cards.
 # Only verified official URLs are pre-populated; others can be discovered via Playwright.
@@ -811,101 +811,102 @@ async def discover_bank_cards_via_playwright(
     seen_norms = set()
 
     try:
-        async with async_playwright() as p:
-            browser = await _launch_browser(p)
-            context = await browser.new_context(
-                user_agent=USER_AGENT,
-                locale="zh-TW",
-                viewport={"width": 1280, "height": 900},
-            )
-            page = await context.new_page()
-            try:
-                for page_url in list_urls:
-                    await page.goto(page_url, wait_until="domcontentloaded", timeout=20000)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=5000)
-                    except Exception:
-                        pass
+        async with get_playwright_semaphore():
+            async with async_playwright() as p:
+                browser = await _launch_browser(p)
+                context = await browser.new_context(
+                    user_agent=USER_AGENT,
+                    locale="zh-TW",
+                    viewport={"width": 1280, "height": 900},
+                )
+                page = await context.new_page()
+                try:
+                    for page_url in list_urls:
+                        await page.goto(page_url, wait_until="domcontentloaded", timeout=20000)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
 
-                    raw_pairs = await page.evaluate(
-                        """(hasLinkFilter) => {
-                            const isNavChrome = (el) => Boolean(
-                                el.closest("header, nav, footer, [role='navigation']")
-                            );
-                            const genericLinkRe = /^(了解更多|瞭解更多|詳細介紹|信用卡介紹|卡片介紹|看更多|立即查看|更多資訊)$/;
-                            const findCardBox = (el) => {
-                                let cur = el.parentElement;
-                                while (cur && cur !== document.body) {
-                                    if (cur.matches("li, article, [class*='card-list'], [class*='list-box'], [class*='card-item'], [class*='card_item'], [class*='card-box'], [class*='card-wrap'], [class*='product'], [class*='item'], [class*='box']")) {
-                                        if (cur.querySelector("a[href]")) return cur;
+                        raw_pairs = await page.evaluate(
+                            """(hasLinkFilter) => {
+                                const isNavChrome = (el) => Boolean(
+                                    el.closest("header, nav, footer, [role='navigation']")
+                                );
+                                const genericLinkRe = /^(了解更多|瞭解更多|詳細介紹|信用卡介紹|卡片介紹|看更多|立即查看|更多資訊)$/;
+                                const findCardBox = (el) => {
+                                    let cur = el.parentElement;
+                                    while (cur && cur !== document.body) {
+                                        if (cur.matches("li, article, [class*='card-list'], [class*='list-box'], [class*='card-item'], [class*='card_item'], [class*='card-box'], [class*='card-wrap'], [class*='product'], [class*='item'], [class*='box']")) {
+                                            if (cur.querySelector("a[href]")) return cur;
+                                        }
+                                        cur = cur.parentElement;
                                     }
-                                    cur = cur.parentElement;
-                                }
-                                return el.closest("section");
-                            };
-                            const pickCardHref = (el, cardBox) => {
-                                const ownHref = el.getAttribute("href") || "";
-                                if (ownHref && !ownHref.startsWith("#") && !ownHref.startsWith("javascript:")) {
-                                    return ownHref;
-                                }
-                                if (!cardBox) return "";
-                                const links = Array.from(cardBox.querySelectorAll("a[href]"))
-                                    .map((a) => ({
-                                        href: a.getAttribute("href") || "",
-                                        txt: (a.innerText || "").trim(),
-                                    }))
-                                    .filter((x) => x.href && !x.href.startsWith("#") && !x.href.startsWith("javascript:"));
-                                const detail = links.find((x) => !/申辦|申請|apply/i.test(x.txt + x.href));
-                                return (detail || links[0] || {}).href || "";
-                            };
-                            const pickCardName = (el, cardBox) => {
-                                const firstLine = (el.innerText || "").split(/\\r?\\n/)[0].replace(/\\s+/g, " ").trim();
-                                const boxTitle = cardBox
-                                    ? (cardBox.querySelector("h1, h2, h3, h4, [class*='card-title'], [class*='card_name'], [class*='title'], [class*='name']")?.innerText || "")
-                                        .split(/\\r?\\n/)[0]
-                                        .replace(/\\s+/g, " ")
-                                        .trim()
-                                    : "";
-                                if ((!firstLine || genericLinkRe.test(firstLine) || firstLine.length > 24) && boxTitle) {
-                                    return boxTitle;
-                                }
-                                return firstLine;
-                            };
+                                    return el.closest("section");
+                                };
+                                const pickCardHref = (el, cardBox) => {
+                                    const ownHref = el.getAttribute("href") || "";
+                                    if (ownHref && !ownHref.startsWith("#") && !ownHref.startsWith("javascript:")) {
+                                        return ownHref;
+                                    }
+                                    if (!cardBox) return "";
+                                    const links = Array.from(cardBox.querySelectorAll("a[href]"))
+                                        .map((a) => ({
+                                            href: a.getAttribute("href") || "",
+                                            txt: (a.innerText || "").trim(),
+                                        }))
+                                        .filter((x) => x.href && !x.href.startsWith("#") && !x.href.startsWith("javascript:"));
+                                    const detail = links.find((x) => !/申辦|申請|apply/i.test(x.txt + x.href));
+                                    return (detail || links[0] || {}).href || "";
+                                };
+                                const pickCardName = (el, cardBox) => {
+                                    const firstLine = (el.innerText || "").split(/\\r?\\n/)[0].replace(/\\s+/g, " ").trim();
+                                    const boxTitle = cardBox
+                                        ? (cardBox.querySelector("h1, h2, h3, h4, [class*='card-title'], [class*='card_name'], [class*='title'], [class*='name']")?.innerText || "")
+                                            .split(/\\r?\\n/)[0]
+                                            .replace(/\\s+/g, " ")
+                                            .trim()
+                                        : "";
+                                    if ((!firstLine || genericLinkRe.test(firstLine) || firstLine.length > 24) && boxTitle) {
+                                        return boxTitle;
+                                    }
+                                    return firstLine;
+                                };
 
-                            const selector = hasLinkFilter
-                                ? "a[href]"
-                                : "main a, [role='main'] a, article a, [class*='card'] a, [class*='card'] h2, [class*='card'] h3, [class*='card'] h4, [class*='card-title'], [class*='card_name'], [class*='list-box'] p[class*='title'], [class*='list'] a";
-                            const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 450);
+                                const selector = hasLinkFilter
+                                    ? "a[href]"
+                                    : "main a, [role='main'] a, article a, [class*='card'] a, [class*='card'] h2, [class*='card'] h3, [class*='card'] h4, [class*='card-title'], [class*='card_name'], [class*='list-box'] p[class*='title'], [class*='list'] a";
+                                const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 450);
 
-                            return nodes
-                                .filter((el) => !isNavChrome(el))
-                                .map((el) => {
-                                    const cardBox = findCardBox(el);
-                                    const name = pickCardName(el, cardBox);
-                                    const href = pickCardHref(el, cardBox);
-                                    const boxText = cardBox ? (cardBox.innerText || "").slice(0, 180) : "";
-                                    const sectionHeading = el.closest("section")?.querySelector("h1, h2, h3")?.innerText || "";
-                                    return [name, href, `${sectionHeading} ${boxText}`.trim()];
-                                });
-                        }""",
-                        bool(link_include),
-                    )
+                                return nodes
+                                    .filter((el) => !isNavChrome(el))
+                                    .map((el) => {
+                                        const cardBox = findCardBox(el);
+                                        const name = pickCardName(el, cardBox);
+                                        const href = pickCardHref(el, cardBox);
+                                        const boxText = cardBox ? (cardBox.innerText || "").slice(0, 180) : "";
+                                        const sectionHeading = el.closest("section")?.querySelector("h1, h2, h3")?.innerText || "";
+                                        return [name, href, `${sectionHeading} ${boxText}`.trim()];
+                                    });
+                            }""",
+                            bool(link_include),
+                        )
 
-                    page_items = _filter_bank_links(
-                        [tuple(pair) for pair in raw_pairs],
-                        page_url,
-                        link_include,
-                        link_exclude,
-                    )
-                    for item in page_items:
-                        norm = normalize_card_query(item["card_name"])
-                        if norm and norm not in seen_norms:
-                            seen_norms.add(norm)
-                            discovered.append(item)
-            finally:
-                await page.close()
-                await context.close()
-                await browser.close()
+                        page_items = _filter_bank_links(
+                            [tuple(pair) for pair in raw_pairs],
+                            page_url,
+                            link_include,
+                            link_exclude,
+                        )
+                        for item in page_items:
+                            norm = normalize_card_query(item["card_name"])
+                            if norm and norm not in seen_norms:
+                                seen_norms.add(norm)
+                                discovered.append(item)
+                finally:
+                    await page.close()
+                    await context.close()
+                    await browser.close()
     except Exception as exc:
         cards = list_cards_for_bank(bank_code, db_path=db_path) or []
         return BankDiscoverResponse(

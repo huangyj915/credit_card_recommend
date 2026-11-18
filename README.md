@@ -100,12 +100,16 @@ playwright install chromium
 
 本專案已提供 [Dockerfile](Dockerfile) 與 [render.yaml](render.yaml)，可直接部署至支援 Docker 的雲端平台（如 **Render**、**Zeabur**、**Railway**、**Fly.io**）：
 
-### 本機使用 Docker 驗證
+### 本機使用 Docker Compose 啟動（自架主機推薦）
 
 ```bash
-docker build -t credit-card-recommend .
-docker run --rm -p 8000:8000 credit-card-recommend
+cp .env.example .env
+# 編輯 .env 設定你的 ADMIN_TOKEN（管理員密碼），再啟動容器
+docker compose up -d --build
 ```
+
+- 預設僅綁定 `127.0.0.1:8000` 並自動掛載 `./data:/app/data` 保留 SQLite 資料庫，搭配 **Cloudflare Tunnel** 對外綁定固定網域即可兼顧安全與持久化。
+- Playwright 爬蟲內建單一併發鎖（同一時間最多執行 1 個無頭瀏覽器任務），並支援 `ADMIN_TOKEN` 與 `PUBLIC_READONLY` 防護避免公開網站遭濫用。
 
 ### 部署至 Render（免費方案）
 1. 登入 [Render](https://render.com/)，選擇 **New + → Blueprint**（或 **Web Service**）。

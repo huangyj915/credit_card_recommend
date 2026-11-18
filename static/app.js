@@ -41,6 +41,58 @@ let channelsData = [];
 let cardsData = [];
 let banksCatalog = [];
 let selectedBankCards = [];
+let appConfig = { admin_protected: false, public_readonly: false, docs_enabled: true };
+
+function buildAdminHeaders(extra = {}) {
+  const headers = { ...extra };
+  if (appConfig.admin_protected) {
+    const input = document.getElementById("adminTokenInput");
+    const token = (input ? input.value : sessionStorage.getItem("cc_admin_token") || "").trim();
+    if (token) {
+      headers["X-Admin-Token"] = token;
+    }
+  }
+  return headers;
+}
+
+function renderAuthBar() {
+  const bar = document.getElementById("scraperAuthBar");
+  const docsLink = document.getElementById("docsLink");
+  if (docsLink && appConfig.docs_enabled === false) {
+    docsLink.classList.add("hidden");
+  }
+
+  if (appConfig.public_readonly) {
+    bar.classList.remove("hidden");
+    bar.innerHTML = `
+      <div class="auth-readonly">
+        🔒 <strong>目前為公開展示模式</strong>：訪客可正常使用推薦試算與各卡比較表；為保護主機資源，爬蟲與卡片寫入功能已鎖定。
+      </div>
+    `;
+    document.getElementById("runScrapeBtn").disabled = true;
+    document.getElementById("runCustomScrapeBtn").disabled = true;
+    document.getElementById("discoverBankCardsBtn").disabled = true;
+    return;
+  }
+
+  if (appConfig.admin_protected) {
+    const saved = sessionStorage.getItem("cc_admin_token") || "";
+    bar.classList.remove("hidden");
+    bar.innerHTML = `
+      <label class="auth-input-wrap">
+        <span>🔐 管理員密碼（啟動爬蟲／更新資料庫須驗證）</span>
+        <input type="password" id="adminTokenInput" value="${escapeHtml(saved)}" placeholder="請輸入管理員密碼 (ADMIN_TOKEN)" />
+      </label>
+    `;
+    document.getElementById("adminTokenInput").addEventListener("input", (e) => {
+      sessionStorage.setItem("cc_admin_token", e.target.value);
+    });
+    return;
+  }
+
+  bar.classList.add("hidden");
+  bar.innerHTML = "";
+}
 
 function formatNtd(amount) {
   return `NT$ ${Math.round(amount).toLocaleString("zh-TW")}`;
@@ -399,10 +451,16 @@ async function runScrape() {
   try {
     const res = await fetch("/api/scrape", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildAdminHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ bank_codes: selected, mode }),
     });
     const data = await res.json();
+    if (!res.ok) {
+      document.getElementById("scrapeResults").innerHTML = `
+        <div class="scrape-item scrape-error">${escapeHtml(data.detail || "執行失敗")}</div>
+      `;
+      return;
+    }
     await handleScrapeResponse(data);
   } finally {
     btn.disabled = false;
@@ -523,6 +581,7 @@ async function discoverMoreBankCards() {
   try {
     const res = await fetch(`/api/banks/${encodeURIComponent(bankCode)}/discover`, {
       method: "POST",
+      headers: buildAdminHeaders(),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -567,7 +626,7 @@ async function runCustomScrape(e) {
   try {
     const res = await fetch("/api/scrape/custom", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildAdminHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         card_name: cardName,
         bank_name: bankName || null,
@@ -577,7 +636,9 @@ async function runCustomScrape(e) {
     });
     const data = await res.json();
     if (!res.ok) {
-      alert(data.detail || "自訂爬取失敗");
+      document.getElementById("scrapeResults").innerHTML = `
+        <div class="scrape-item scrape-error">${escapeHtml(data.detail || "自訂爬取失敗")}</div>
+      `;
       return;
     }
     await handleScrapeResponse(data);
@@ -606,9 +667,17 @@ function setupTabs() {
 async function init() {
   setupTabs();
 
-  const [chRes, cardsRes] = await Promise.all([fetch("/api/channels"), fetch("/api/cards")]);
+  const [chRes, cardsRes, cfgRes] = await Promise.all([
+    fetch("/api/channels"),
+    fetch("/api/cards"),
+    fetch("/api/config"),
+  ]);
   channelsData = await chRes.json();
   cardsData = await cardsRes.json();
+  if (cfgRes.ok) {
+    appConfig = await cfgRes.json();
+  }
+  renderAuthBar();
 
   renderChannels();
   renderMatrix();

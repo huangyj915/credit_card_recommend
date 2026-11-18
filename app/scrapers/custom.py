@@ -26,7 +26,12 @@ from app.scrapers.base import (
     detect_discontinued_marker,
     extract_percentage,
 )
-from app.scrapers.manager import SCRAPER_REGISTRY, USER_AGENT, _launch_browser
+from app.scrapers.manager import (
+    SCRAPER_REGISTRY,
+    USER_AGENT,
+    _launch_browser,
+    get_playwright_semaphore,
+)
 
 SEARCH_BLOCK_MARKERS = (
     "captcha",
@@ -414,122 +419,123 @@ async def scrape_custom_card(
                 url=target_url or "",
             )
 
-    async with async_playwright() as p:
-        browser = await _launch_browser(p)
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            locale="zh-TW",
-            viewport={"width": 1280, "height": 900},
-        )
-        page = await context.new_page()
-        try:
-            if matched_code and not cleaned_url:
-                scraper = SCRAPER_REGISTRY[matched_code]
-                card_data = (
-                    await scraper.scrape_demo_html(page)
-                    if mode == "demo_html"
-                    else await scraper.scrape_live(page)
-                )
-            else:
-                if not target_url:
-                    discovered, reason = await discover_official_url(page, cleaned_name, cleaned_bank)
-                    if not discovered:
-                        msg = (
-                            f"無法自動定位「{cleaned_name}」的官網頁面（{reason}），"
-                            "請於下方補填該卡的「官方介紹頁網址」再試一次。"
-                        )
-                        log_scrape(bank_code, target_slug, "", "warning", msg, 0, db_path=db_path)
-                        return ScrapeResultItem(
-                            bank_code=bank_code,
-                            card_slug=target_slug,
-                            status="warning",
-                            message=msg,
-                        )
-                    target_url = discovered
+    async with get_playwright_semaphore():
+        async with async_playwright() as p:
+            browser = await _launch_browser(p)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                locale="zh-TW",
+                viewport={"width": 1280, "height": 900},
+            )
+            page = await context.new_page()
+            try:
+                if matched_code and not cleaned_url:
+                    scraper = SCRAPER_REGISTRY[matched_code]
+                    card_data = (
+                        await scraper.scrape_demo_html(page)
+                        if mode == "demo_html"
+                        else await scraper.scrape_live(page)
+                    )
+                else:
+                    if not target_url:
+                        discovered, reason = await discover_official_url(page, cleaned_name, cleaned_bank)
+                        if not discovered:
+                            msg = (
+                                f"無法自動定位「{cleaned_name}」的官網頁面（{reason}），"
+                                "請於下方補填該卡的「官方介紹頁網址」再試一次。"
+                            )
+                            log_scrape(bank_code, target_slug, "", "warning", msg, 0, db_path=db_path)
+                            return ScrapeResultItem(
+                                bank_code=bank_code,
+                                card_slug=target_slug,
+                                status="warning",
+                                message=msg,
+                            )
+                        target_url = discovered
 
-                await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
 
-                card_data = await parse_generic_card_page(
-                    page=page,
-                    card_name=existing_card.card_name if existing_card else cleaned_name,
-                    official_url=target_url,
-                    bank_name=cleaned_bank or (existing_card.bank_name if existing_card else None),
-                    card_slug=target_slug,
-                    annual_fee=existing_card.annual_fee if existing_card else "依銀行官網公告",
-                    reward_unit=existing_card.reward_unit if existing_card else "現金回饋 / 點數",
-                )
+                    card_data = await parse_generic_card_page(
+                        page=page,
+                        card_name=existing_card.card_name if existing_card else cleaned_name,
+                        official_url=target_url,
+                        bank_name=cleaned_bank or (existing_card.bank_name if existing_card else None),
+                        card_slug=target_slug,
+                        annual_fee=existing_card.annual_fee if existing_card else "依銀行官網公告",
+                        reward_unit=existing_card.reward_unit if existing_card else "現金回饋 / 點數",
+                    )
 
-            discontinued_reason = await check_page_discontinued(page, target_url or "")
-            if discontinued_reason:
-                msg = (
-                    f"偵測到「{card_data.card_name}」已停發或停止申辦（{discontinued_reason}），"
-                    "已略過不寫入資料庫。"
-                )
+                discontinued_reason = await check_page_discontinued(page, target_url or "")
+                if discontinued_reason:
+                    msg = (
+                        f"偵測到「{card_data.card_name}」已停發或停止申辦（{discontinued_reason}），"
+                        "已略過不寫入資料庫。"
+                    )
+                    log_scrape(
+                        bank_code,
+                        card_data.card_slug,
+                        target_url or "",
+                        "warning",
+                        msg,
+                        0,
+                        db_path=db_path,
+                    )
+                    return ScrapeResultItem(
+                        bank_code=bank_code,
+                        card_slug=card_data.card_slug,
+                        status="warning",
+                        message=msg,
+                        url=target_url or "",
+                    )
+
+                if not card_data.rules:
+                    msg = (
+                        f"已開啟頁面但未解析出「{card_data.card_name}」的結構化回饋規則"
+                        "（可能因官網改版、JS 動態載入或防爬阻擋），未更動既有資料。"
+                    )
+                    log_scrape(bank_code, card_data.card_slug, target_url or "", "warning", msg, 0, db_path=db_path)
+                    return ScrapeResultItem(
+                        bank_code=bank_code,
+                        card_slug=card_data.card_slug,
+                        status="warning",
+                        message=msg,
+                        url=target_url or "",
+                    )
+
+                upsert_card(card_data, db_path=db_path)
+                msg = f"成功透過 Playwright 解析並更新「{card_data.bank_name} {card_data.card_name}」共 {len(card_data.rules)} 條通路規則"
                 log_scrape(
                     bank_code,
                     card_data.card_slug,
-                    target_url or "",
-                    "warning",
+                    target_url or card_data.official_url,
+                    "success",
                     msg,
-                    0,
+                    len(card_data.rules),
                     db_path=db_path,
                 )
                 return ScrapeResultItem(
                     bank_code=bank_code,
                     card_slug=card_data.card_slug,
-                    status="warning",
+                    status="success",
                     message=msg,
-                    url=target_url or "",
+                    rules_count=len(card_data.rules),
+                    url=target_url or card_data.official_url,
                 )
-
-            if not card_data.rules:
-                msg = (
-                    f"已開啟頁面但未解析出「{card_data.card_name}」的結構化回饋規則"
-                    "（可能因官網改版、JS 動態載入或防爬阻擋），未更動既有資料。"
-                )
-                log_scrape(bank_code, card_data.card_slug, target_url or "", "warning", msg, 0, db_path=db_path)
+            except Exception as exc:
+                msg = f"爬取「{cleaned_name}」失敗：{type(exc).__name__}: {str(exc)[:180]}"
+                log_scrape(bank_code, target_slug, target_url or "", "error", msg, 0, db_path=db_path)
                 return ScrapeResultItem(
                     bank_code=bank_code,
-                    card_slug=card_data.card_slug,
-                    status="warning",
+                    card_slug=target_slug,
+                    status="error",
                     message=msg,
                     url=target_url or "",
                 )
-
-            upsert_card(card_data, db_path=db_path)
-            msg = f"成功透過 Playwright 解析並更新「{card_data.bank_name} {card_data.card_name}」共 {len(card_data.rules)} 條通路規則"
-            log_scrape(
-                bank_code,
-                card_data.card_slug,
-                target_url or card_data.official_url,
-                "success",
-                msg,
-                len(card_data.rules),
-                db_path=db_path,
-            )
-            return ScrapeResultItem(
-                bank_code=bank_code,
-                card_slug=card_data.card_slug,
-                status="success",
-                message=msg,
-                rules_count=len(card_data.rules),
-                url=target_url or card_data.official_url,
-            )
-        except Exception as exc:
-            msg = f"爬取「{cleaned_name}」失敗：{type(exc).__name__}: {str(exc)[:180]}"
-            log_scrape(bank_code, target_slug, target_url or "", "error", msg, 0, db_path=db_path)
-            return ScrapeResultItem(
-                bank_code=bank_code,
-                card_slug=target_slug,
-                status="error",
-                message=msg,
-                url=target_url or "",
-            )
-        finally:
-            await page.close()
-            await context.close()
-            await browser.close()
+            finally:
+                await page.close()
+                await context.close()
+                await browser.close()

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>台灣信用卡回饋比較 & 常用通路推薦系統</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=5" />
 </head>
 <body>
   <header class="hero">
@@ -15,7 +15,7 @@
         <p class="subtitle">輸入你每個月在各通路的消費金額，系統自動精算回饋上限與切換方案，幫你找出最划算的「無腦單卡」與「多卡組合」。</p>
       </div>
       <div class="hero-actions">
-        <a href="/docs" target="_blank" class="btn btn-ghost">API 文件 (/docs)</a>
+        <a href="/docs" id="docsLink" target="_blank" class="btn btn-ghost">API 文件 (/docs)</a>
       </div>
     </div>
   </header>
@@ -88,6 +88,8 @@
             銀行官網常有動態 JavaScript 渲染或版型差異。你可以選擇「即時爬取銀行官網」，或用「離線示範 HTML」測試 Playwright Chromium 的解析流程。
           </p>
         </div>
+
+        <div id="scraperAuthBar" class="auth-bar hidden"></div>
 
         <div class="scraper-controls">
           <div class="scraper-banks" id="scraperBanks"></div>
@@ -164,6 +166,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>
