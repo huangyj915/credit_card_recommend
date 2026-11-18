@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -41,6 +41,13 @@ def create_app(db_path: Optional[Path] = None) -> FastAPI:
     )
 
     application.state.db_path = db_path
+
+    @application.middleware("http")
+    async def disable_static_cache(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
     if STATIC_DIR.exists():
         application.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
