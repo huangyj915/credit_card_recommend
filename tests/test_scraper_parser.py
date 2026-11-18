@@ -4,7 +4,9 @@ import asyncio
 
 from app.db import init_db, list_cards
 from app.scrapers.base import (
+    check_page_discontinued,
     detect_channels_from_text,
+    detect_discontinued_in_page_fields,
     extract_monthly_cap,
     extract_percentage,
 )
@@ -90,3 +92,47 @@ def test_custom_scraper_helpers_and_generic_parser(tmp_path):
     assert parsed.source_type == "scraped"
     assert any(r.channel_code == "overseas" and r.rate == 5.0 and r.monthly_cap_ntd == 1000.0 for r in parsed.rules)
     assert any(r.channel_code == "delivery" and r.rate == 3.0 for r in parsed.rules)
+
+
+def test_discontinued_page_detection():
+    # Active card with a footer link mentioning 停發卡專區 must NOT false-positive
+    assert (
+        detect_discontinued_in_page_fields(
+            title="CUBE 信用卡 | 國泰世華銀行",
+            heading_text="CUBE 卡介紹",
+            badge_text="熱門推薦",
+            body_text="一般消費 0.3% 回饋。頁尾導覽：常見問題 | 停發卡專區 | 聯絡我們",
+            url="https://www.cathaybk.com.tw/cards/cube/",
+        )
+        is None
+    )
+
+    # Discontinued card page must be detected
+    assert (
+        detect_discontinued_in_page_fields(
+            title="數位生活卡 | 台北富邦",
+            heading_text="數位生活卡",
+            badge_text="",
+            body_text="親愛的卡友您好，本卡已於 2025/01/01 起停止受理新卡申辦。",
+            url="https://www.fubon.com/cards/digital/",
+        )
+        is not None
+    )
+
+    async def _check_dom():
+        html = """
+        <!doctype html>
+        <html lang="zh-Hant">
+        <head><title>測試卡（已停發）</title></head>
+        <body><h1>測試停發卡</h1><p>本卡已停發，僅提供既有卡友查詢。</p></body>
+        </html>
+        """
+        async with async_playwright() as p:
+            browser = await _launch_browser(p)
+            page = await browser.new_page()
+            await page.set_content(html, wait_until="domcontentloaded")
+            reason = await check_page_discontinued(page, "https://example.com/card")
+            await browser.close()
+            return reason
+
+    assert asyncio.run(_check_dom()) is not None

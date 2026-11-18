@@ -12,7 +12,12 @@ from playwright.async_api import Page, async_playwright
 from app.catalog import TAIWAN_BANK_HINTS, normalize_card_query
 from app.db import list_cards, log_scrape, upsert_card
 from app.models import CardIn, CardOut, ScrapeResultItem
-from app.scrapers.base import build_rules_from_blocks, extract_percentage
+from app.scrapers.base import (
+    build_rules_from_blocks,
+    check_page_discontinued,
+    detect_discontinued_marker,
+    extract_percentage,
+)
 from app.scrapers.manager import SCRAPER_REGISTRY, USER_AGENT, _launch_browser
 
 SEARCH_BLOCK_MARKERS = (
@@ -152,21 +157,32 @@ async def discover_official_url(
     if any(marker in body_text for marker in SEARCH_BLOCK_MARKERS):
         return None, "搜尋引擎觸發驗證或防爬機制，無法自動搜尋"
 
-    links = page.locator("li.b_algo h2 a, main a[href^='http']")
-    count = min(await links.count(), 20)
+    links = page.locator("li.b_algo")
+    count = min(await links.count(), 15)
     candidates: List[Tuple[int, str]] = []
+    skipped_discontinued = 0
     for i in range(count):
-        href = await links.nth(i).get_attribute("href")
+        item = links.nth(i)
+        anchor = item.locator("h2 a").first
+        if await anchor.count() == 0:
+            continue
+        href = await anchor.get_attribute("href")
         if not href:
             continue
         ok, _ = validate_public_http_url(href)
         if not ok:
+            continue
+        snippet_text = (await item.inner_text()).strip()
+        if detect_discontinued_marker(snippet_text) or detect_discontinued_marker(href):
+            skipped_discontinued += 1
             continue
         score = _score_candidate_url(href, card_name)
         if score > 0:
             candidates.append((score, href))
 
     if not candidates:
+        if skipped_discontinued > 0:
+            return None, "搜尋結果顯示該信用卡可能已停發或停止申辦，已略過抓取"
         return None, "搜尋結果中找不到合適的銀行官網介紹頁"
 
     candidates.sort(key=lambda item: item[0], reverse=True)
@@ -242,6 +258,15 @@ async def scrape_custom_card(
     cleaned_name = card_name.strip()
     cleaned_bank = bank_name.strip() if bank_name else None
     cleaned_url = official_url.strip() if official_url else None
+
+    if detect_discontinued_marker(cleaned_name):
+        return ScrapeResultItem(
+            bank_code="custom",
+            card_slug="",
+            status="warning",
+            message=f"「{cleaned_name}」標示為停發／停止申辦卡片，已依設定略過不抓取。",
+            url=cleaned_url or "",
+        )
 
     if cleaned_url:
         ok, err = validate_public_http_url(cleaned_url)
@@ -329,6 +354,29 @@ async def scrape_custom_card(
                     card_slug=target_slug,
                     annual_fee=existing_card.annual_fee if existing_card else "依銀行官網公告",
                     reward_unit=existing_card.reward_unit if existing_card else "現金回饋 / 點數",
+                )
+
+            discontinued_reason = await check_page_discontinued(page, target_url or "")
+            if discontinued_reason:
+                msg = (
+                    f"偵測到「{card_data.card_name}」已停發或停止申辦（{discontinued_reason}），"
+                    "已略過不寫入資料庫。"
+                )
+                log_scrape(
+                    bank_code,
+                    card_data.card_slug,
+                    target_url or "",
+                    "warning",
+                    msg,
+                    0,
+                    db_path=db_path,
+                )
+                return ScrapeResultItem(
+                    bank_code=bank_code,
+                    card_slug=card_data.card_slug,
+                    status="warning",
+                    message=msg,
+                    url=target_url or "",
                 )
 
             if not card_data.rules:

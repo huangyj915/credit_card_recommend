@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright
 
 from app.db import list_cards, list_directory_cards, upsert_directory_cards
 from app.models import BankCardCatalogItem, BankCatalogItem, BankDiscoverResponse
+from app.scrapers.base import detect_discontinued_marker
 from app.scrapers.manager import USER_AGENT, _launch_browser
 
 # Curated Taiwan issuing banks and representative credit cards.
@@ -27,7 +28,6 @@ TAIWAN_BANKS: List[Dict] = [
             {"card_name": "蝦皮購物聯名卡", "official_url": ""},
             {"card_name": "長榮航空聯名卡", "official_url": ""},
             {"card_name": "亞洲萬里通聯名卡", "official_url": ""},
-            {"card_name": "台塑聯名卡", "official_url": ""},
             {"card_name": "世界卡", "official_url": ""},
         ],
     },
@@ -46,7 +46,6 @@ TAIWAN_BANKS: List[Dict] = [
             {"card_name": "太陽 / 玫瑰卡（切換刷）", "official_url": ""},
             {"card_name": "街口聯名卡", "official_url": ""},
             {"card_name": "遠傳 friDay 聯名卡", "official_url": ""},
-            {"card_name": "大買家聯名卡", "official_url": ""},
         ],
     },
     {
@@ -81,7 +80,6 @@ TAIWAN_BANKS: List[Dict] = [
             {"card_name": "富邦 momo 卡", "official_url": ""},
             {"card_name": "Open Possible 聯名卡", "official_url": ""},
             {"card_name": "尊御世界卡", "official_url": ""},
-            {"card_name": "數位生活卡", "official_url": ""},
         ],
     },
     {
@@ -364,6 +362,8 @@ def list_cards_for_bank(
 
     # 2. Cards previously discovered via Playwright from the bank's overview page
     for row in list_directory_cards(bank_code, db_path=db_path):
+        if detect_discontinued_marker(row["card_name"]) or detect_discontinued_marker(row.get("official_url") or ""):
+            continue
         key = normalize_card_query(row["card_name"])
         existing = merged.get(key)
         if existing is None:
@@ -414,14 +414,18 @@ def list_bank_catalog(db_path: Optional[Path] = None) -> List[BankCatalogItem]:
 
 
 def extract_card_candidates_from_links(
-    links: List[Tuple[str, str]],
+    links: List[Tuple[str, ...]],
     base_url: str,
 ) -> List[Dict[str, str]]:
-    """Filter raw (text, href) pairs from a bank overview page into plausible card entries."""
+    """Filter raw (text, href[, context]) tuples from a bank overview page, excluding discontinued cards."""
     results: List[Dict[str, str]] = []
     seen = set()
 
-    for raw_text, raw_href in links:
+    for item in links:
+        raw_text = item[0] if len(item) > 0 else ""
+        raw_href = item[1] if len(item) > 1 else ""
+        raw_context = item[2] if len(item) > 2 else ""
+
         text = re.sub(r"\s+", " ", (raw_text or "")).strip()
         if not text or len(text) < 2 or len(text) > 32:
             continue
@@ -430,6 +434,12 @@ def extract_card_candidates_from_links(
         if "卡" not in text and "card" not in text.lower():
             continue
         if any(noise in text for noise in ("注意事項", "權益", "總覽", "說明", "申請", "申辦", "查詢", "客服", "更多")):
+            continue
+        if (
+            detect_discontinued_marker(text)
+            or detect_discontinued_marker(raw_href)
+            or detect_discontinued_marker(raw_context)
+        ):
             continue
 
         norm = normalize_card_query(text)
@@ -450,7 +460,7 @@ async def discover_bank_cards_via_playwright(
     bank_code: str,
     db_path: Optional[Path] = None,
 ) -> Optional[BankDiscoverResponse]:
-    """Use Playwright Chromium to fetch additional card names from the bank's overview page."""
+    """Use Playwright Chromium to fetch additional active card names from the bank's overview page."""
     bank = BANK_BY_CODE.get(bank_code)
     if bank is None:
         return None
@@ -475,16 +485,24 @@ async def discover_bank_cards_via_playwright(
                 except Exception:
                     pass
 
-                elements = page.locator("a, h2, h3, h4, [class*='card-title'], [class*='card_name']")
-                count = min(await elements.count(), 250)
-                raw_pairs: List[Tuple[str, str]] = []
-                for i in range(count):
-                    el = elements.nth(i)
-                    text = (await el.inner_text()).strip()
-                    href = await el.get_attribute("href") or ""
-                    raw_pairs.append((text, href))
+                raw_pairs = await page.evaluate(
+                    """() => {
+                        const nodes = Array.from(document.querySelectorAll("a, h2, h3, h4, [class*='card-title'], [class*='card_name']")).slice(0, 250);
+                        return nodes.map((el) => {
+                            const text = (el.innerText || "").trim();
+                            const href = el.getAttribute("href") || "";
+                            const cardBox = el.closest("li, article, [class*='card'], [class*='item'], section");
+                            const boxText = cardBox ? (cardBox.innerText || "").slice(0, 180) : "";
+                            const sectionHeading = el.closest("section")?.querySelector("h1, h2, h3")?.innerText || "";
+                            return [text, href, `${sectionHeading} ${boxText}`.trim()];
+                        });
+                    }"""
+                )
 
-                discovered = extract_card_candidates_from_links(raw_pairs, list_url)
+                discovered = extract_card_candidates_from_links(
+                    [tuple(pair) for pair in raw_pairs],
+                    list_url,
+                )
             finally:
                 await page.close()
                 await context.close()

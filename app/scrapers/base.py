@@ -24,6 +24,97 @@ CHANNEL_KEYWORDS: List[Tuple[str, List[str]]] = [
 ]
 
 
+DISCONTINUED_MARKERS = (
+    "停發",
+    "停止發行",
+    "停止申辦",
+    "不再受理",
+    "已下架",
+    "已終止",
+    "終止發行",
+    "停辦",
+    "discontinued",
+)
+
+DISCONTINUED_BODY_PHRASES = (
+    "本卡已停發",
+    "本卡停止發行",
+    "本卡已停止發行",
+    "本卡已停止申辦",
+    "本卡停止申辦",
+    "已全面停發",
+    "停止受理新卡",
+    "不再受理新卡",
+    "不再受理申辦",
+    "信用卡已停發",
+    "已停止新卡申辦",
+    "本信用卡已停辦",
+    "停止發行及申請",
+    "停發暨換發公告",
+)
+
+
+def detect_discontinued_marker(text: str) -> Optional[str]:
+    """Return matching discontinued marker if short label/context mentions card retirement."""
+    lowered = (text or "").lower()
+    for marker in DISCONTINUED_MARKERS:
+        if marker in lowered:
+            return marker
+    return None
+
+
+def detect_discontinued_in_page_fields(
+    title: str = "",
+    heading_text: str = "",
+    badge_text: str = "",
+    body_text: str = "",
+    url: str = "",
+) -> Optional[str]:
+    """Detect whether a credit card page represents a discontinued card without menu false positives."""
+    url_lower = (url or "").lower()
+    if any(tok in url_lower for tok in ("discontinued", "stop-issue", "stop_issue", "停發")):
+        return "網址標示停發"
+
+    for field in (title, heading_text, badge_text):
+        marker = detect_discontinued_marker(field)
+        if marker:
+            return marker
+
+    body_lower = (body_text or "").lower()
+    for phrase in DISCONTINUED_BODY_PHRASES:
+        if phrase in body_lower:
+            return phrase
+    return None
+
+
+async def check_page_discontinued(page: Page, url: str = "") -> Optional[str]:
+    """Inspect a loaded Playwright Page to determine whether the card is discontinued."""
+    snapshot = await page.evaluate(
+        """() => {
+            const title = document.title || "";
+            const heading = Array.from(document.querySelectorAll("h1, main h2"))
+                .slice(0, 5)
+                .map((el) => el.innerText || "")
+                .join(" ");
+            const badges = Array.from(
+                document.querySelectorAll("[class*='badge'], [class*='tag'], [class*='status'], [class*='notice'], [class*='alert']")
+            )
+                .slice(0, 15)
+                .map((el) => el.innerText || "")
+                .join(" ");
+            const body = (document.body?.innerText || "").slice(0, 4000);
+            return { title, heading, badges, body };
+        }"""
+    )
+    return detect_discontinued_in_page_fields(
+        title=snapshot.get("title", ""),
+        heading_text=snapshot.get("heading", ""),
+        badge_text=snapshot.get("badges", ""),
+        body_text=snapshot.get("body", ""),
+        url=url or page.url,
+    )
+
+
 def extract_percentage(text: str) -> Optional[float]:
     """Extract the primary/highest percentage rate from a Chinese/English rule snippet."""
     matches = re.findall(r"(\d+(?:\.\d+)?)\s*%", text)

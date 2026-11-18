@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright
 
 from app.db import log_scrape, upsert_card
 from app.models import ScrapeResultItem
-from app.scrapers.base import BaseBankScraper
+from app.scrapers.base import BaseBankScraper, check_page_discontinued
 from app.scrapers.banks.cathay import CathayCubeScraper
 from app.scrapers.banks.esun import EsunUBearScraper
 from app.scrapers.banks.taishin import TaishinGogoScraper
@@ -82,6 +82,33 @@ async def run_scrapers(
                         card_data = await scraper.scrape_demo_html(page)
                     else:
                         card_data = await scraper.scrape_live(page)
+
+                    discontinued_reason = await check_page_discontinued(page, scraper.official_url)
+                    if discontinued_reason:
+                        msg = (
+                            f"偵測到「{scraper.bank_name} {scraper.card_name}」疑似已停發或停止申辦"
+                            f"（{discontinued_reason}），已略過不更新。"
+                        )
+                        log_scrape(
+                            bank_code=code,
+                            card_slug=scraper.card_slug,
+                            url=scraper.official_url,
+                            status="warning",
+                            message=msg,
+                            rules_count=0,
+                            db_path=db_path,
+                        )
+                        results.append(
+                            ScrapeResultItem(
+                                bank_code=code,
+                                card_slug=scraper.card_slug,
+                                status="warning",
+                                message=msg,
+                                rules_count=0,
+                                url=scraper.official_url,
+                            )
+                        )
+                        continue
 
                     if not card_data.rules:
                         msg = "頁面已開啟但未解析出結構化回饋規則（可能因官網改版、JS 動態載入或 WAF 阻擋），已保留既有資料。"

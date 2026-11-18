@@ -91,9 +91,37 @@ def test_extract_card_candidates_from_links():
             ("星展 eco 永續卡", "/cards/eco"),
             ("星展eco永續信用卡", "/cards/eco-dup"),
             ("星展饗樂生活卡", "/cards/live"),
+            ("星展花旗停發卡", "/cards/old", ""),
+            ("某舊聯名卡", "/cards/legacy", "已停發信用卡 停止申辦"),
+            ("另一張停辦卡", "/cards/discontinued/abc", ""),
         ],
         "https://www.dbs.com.tw/personal-zh/cards/",
     )
     names = [c["card_name"] for c in candidates]
     assert names == ["星展 eco 永續卡", "星展饗樂生活卡"]
     assert candidates[0]["official_url"] == "https://www.dbs.com.tw/cards/eco"
+
+
+def test_discontinued_cards_excluded_from_catalog_and_custom_scrape(tmp_path):
+    db_path = tmp_path / "discontinued_test.db"
+    app = create_app(db_path=db_path)
+
+    with TestClient(app) as client:
+        upsert_directory_cards(
+            "fubon",
+            "台北富邦",
+            [{"card_name": "富邦舊卡（已停發）", "official_url": "https://www.fubon.com/old"}],
+            db_path=db_path,
+        )
+        fubon_names = [c["card_name"] for c in client.get("/api/banks/fubon/cards").json()]
+        assert "數位生活卡" not in fubon_names
+        assert "富邦舊卡（已停發）" not in fubon_names
+
+        res = client.post(
+            "/api/scrape/custom",
+            json={"card_name": "數位生活卡（已停發）", "mode": "live"},
+        )
+        assert res.status_code == 200
+        item = res.json()["results"][0]
+        assert item["status"] == "warning"
+        assert "停發" in item["message"]
