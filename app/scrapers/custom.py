@@ -9,34 +9,11 @@ from urllib.parse import urlparse
 
 from playwright.async_api import Page, async_playwright
 
+from app.catalog import TAIWAN_BANK_HINTS, normalize_card_query
 from app.db import list_cards, log_scrape, upsert_card
 from app.models import CardIn, CardOut, ScrapeResultItem
 from app.scrapers.base import build_rules_from_blocks, extract_percentage
 from app.scrapers.manager import SCRAPER_REGISTRY, USER_AGENT, _launch_browser
-
-# Common Taiwan bank domain/keyword -> bank display name mapping
-TAIWAN_BANK_HINTS: List[Tuple[str, str]] = [
-    ("cathaybk", "國泰世華"),
-    ("esunbank", "玉山銀行"),
-    ("taishinbank", "台新銀行"),
-    ("fubon", "台北富邦"),
-    ("ubot", "聯邦銀行"),
-    ("sinopac", "永豐銀行"),
-    ("ctbcbank", "中國信託"),
-    ("dbs", "星展銀行"),
-    ("hsbc", "匯豐銀行"),
-    ("megabank", "兆豐銀行"),
-    ("firstbank", "第一銀行"),
-    ("hncb", "華南銀行"),
-    ("scsb", "上海商銀"),
-    ("feib", "遠東商銀"),
-    ("yuantabank", "元大銀行"),
-    ("rakuten", "樂天信用卡"),
-    ("tcb-bank", "合作金庫"),
-    ("landbank", "土地銀行"),
-    ("bot.com", "臺灣銀行"),
-    ("citibank", "花旗銀行"),
-]
 
 SEARCH_BLOCK_MARKERS = (
     "captcha",
@@ -46,12 +23,6 @@ SEARCH_BLOCK_MARKERS = (
     "cloudflare",
     "請進行人機驗證",
 )
-
-
-def normalize_card_query(text: str) -> str:
-    """Normalize a card/bank name for fuzzy matching."""
-    cleaned = re.sub(r"[\s\-_@()（）【】「」]+", "", text or "").lower()
-    return cleaned.replace("信用卡", "").replace("卡", "")
 
 
 def build_custom_card_slug(card_name: str, bank_name: Optional[str] = None) -> str:

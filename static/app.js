@@ -39,6 +39,8 @@ const PRESETS = {
 
 let channelsData = [];
 let cardsData = [];
+let banksCatalog = [];
+let selectedBankCards = [];
 
 function formatNtd(amount) {
   return `NT$ ${Math.round(amount).toLocaleString("zh-TW")}`;
@@ -408,15 +410,154 @@ async function runScrape() {
   }
 }
 
+async function loadBankCatalog() {
+  const res = await fetch("/api/banks");
+  banksCatalog = await res.json();
+  const select = document.getElementById("customBankSelect");
+  const current = select.value;
+  select.innerHTML = [
+    `<option value="">-- 請選擇台灣發卡銀行 --</option>`,
+    ...banksCatalog.map(
+      (b) =>
+        `<option value="${escapeHtml(b.bank_code)}">${escapeHtml(b.bank_name)}（${b.card_count} 張可選）</option>`
+    ),
+    `<option value="__other__">其他銀行（自行輸入）</option>`,
+  ].join("");
+  if (current) {
+    select.value = current;
+  }
+}
+
+function renderBankCardOptions(cards) {
+  selectedBankCards = cards || [];
+  const cardSelect = document.getElementById("customCardSelect");
+  if (!selectedBankCards.length) {
+    cardSelect.innerHTML = `<option value="">-- 尚無預設卡名，請於下方手動輸入 --</option>`;
+    cardSelect.disabled = true;
+    return;
+  }
+  cardSelect.disabled = false;
+  cardSelect.innerHTML = [
+    `<option value="">-- 請選擇卡片名稱（共 ${selectedBankCards.length} 張）--</option>`,
+    ...selectedBankCards.map((c, idx) => {
+      const tag = c.in_db ? "（已收錄）" : c.catalog_source === "discovered" ? "（官網擷取）" : "";
+      return `<option value="${idx}">${escapeHtml(c.card_name)}${tag}</option>`;
+    }),
+    `<option value="__manual__">其他 / 自行輸入卡名</option>`,
+  ].join("");
+}
+
+async function onCustomBankChange() {
+  const bankCode = document.getElementById("customBankSelect").value;
+  const manualWrap = document.getElementById("customBankManualWrap");
+  const cardSelect = document.getElementById("customCardSelect");
+  const discoverBtn = document.getElementById("discoverBankCardsBtn");
+  const statusEl = document.getElementById("bankDiscoverStatus");
+
+  statusEl.classList.add("hidden");
+  statusEl.textContent = "";
+
+  if (!bankCode) {
+    manualWrap.classList.add("hidden");
+    cardSelect.innerHTML = `<option value="">請先選擇左側發卡銀行</option>`;
+    cardSelect.disabled = true;
+    discoverBtn.disabled = true;
+    selectedBankCards = [];
+    return;
+  }
+
+  if (bankCode === "__other__") {
+    manualWrap.classList.remove("hidden");
+    cardSelect.innerHTML = `<option value="__manual__">請於下方自行輸入信用卡名稱</option>`;
+    cardSelect.disabled = true;
+    discoverBtn.disabled = true;
+    selectedBankCards = [];
+    return;
+  }
+
+  manualWrap.classList.add("hidden");
+  discoverBtn.disabled = false;
+  cardSelect.disabled = true;
+  cardSelect.innerHTML = `<option value="">載入該銀行卡片中...</option>`;
+
+  const res = await fetch(`/api/banks/${encodeURIComponent(bankCode)}/cards`);
+  if (!res.ok) {
+    renderBankCardOptions([]);
+    return;
+  }
+  const cards = await res.json();
+  renderBankCardOptions(cards);
+}
+
+function onCustomCardSelectChange() {
+  const val = document.getElementById("customCardSelect").value;
+  const nameInput = document.getElementById("customCardName");
+  const urlInput = document.getElementById("customCardUrl");
+
+  if (val === "" || val === "__manual__") {
+    if (val === "__manual__") {
+      nameInput.value = "";
+      urlInput.value = "";
+      nameInput.focus();
+    }
+    return;
+  }
+
+  const chosen = selectedBankCards[Number(val)];
+  if (!chosen) return;
+  nameInput.value = chosen.card_name || "";
+  urlInput.value = chosen.official_url || "";
+}
+
+async function discoverMoreBankCards() {
+  const bankCode = document.getElementById("customBankSelect").value;
+  if (!bankCode || bankCode === "__other__") return;
+
+  const btn = document.getElementById("discoverBankCardsBtn");
+  const statusEl = document.getElementById("bankDiscoverStatus");
+  btn.disabled = true;
+  btn.textContent = "擷取官網卡片中...";
+  statusEl.classList.remove("hidden");
+  statusEl.textContent = "正在啟動 Playwright 開啟該銀行信用卡總覽頁，請稍候...";
+
+  try {
+    const res = await fetch(`/api/banks/${encodeURIComponent(bankCode)}/discover`, {
+      method: "POST",
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      statusEl.textContent = data.detail || "載入失敗";
+      return;
+    }
+    renderBankCardOptions(data.cards || []);
+    await loadBankCatalog();
+    document.getElementById("customBankSelect").value = bankCode;
+    statusEl.textContent = data.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🔍 從官網載入更多卡名";
+  }
+}
+
+function getSelectedCustomBankName() {
+  const bankCode = document.getElementById("customBankSelect").value;
+  if (!bankCode) return "";
+  if (bankCode === "__other__") {
+    return document.getElementById("customBankName").value.trim();
+  }
+  const found = banksCatalog.find((b) => b.bank_code === bankCode);
+  return found ? found.bank_name : "";
+}
+
 async function runCustomScrape(e) {
   e.preventDefault();
   const btn = document.getElementById("runCustomScrapeBtn");
   const cardName = document.getElementById("customCardName").value.trim();
-  const bankName = document.getElementById("customBankName").value.trim();
+  const bankName = getSelectedCustomBankName();
   const officialUrl = document.getElementById("customCardUrl").value.trim();
 
   if (!cardName) {
-    alert("請輸入想爬取的信用卡名稱。");
+    alert("請輸入或選擇想爬取的信用卡名稱。");
     return;
   }
 
@@ -440,6 +581,11 @@ async function runCustomScrape(e) {
       return;
     }
     await handleScrapeResponse(data);
+    await loadBankCatalog();
+    const bankCode = document.getElementById("customBankSelect").value;
+    if (bankCode && bankCode !== "__other__") {
+      await onCustomBankChange();
+    }
   } finally {
     btn.disabled = false;
     btn.textContent = "依卡名啟動 Playwright 爬取";
@@ -466,7 +612,7 @@ async function init() {
 
   renderChannels();
   renderMatrix();
-  await loadScrapersAndLogs();
+  await Promise.all([loadScrapersAndLogs(), loadBankCatalog()]);
 
   document.querySelectorAll(".chip[data-preset]").forEach((btn) => {
     btn.addEventListener("click", () => applyPreset(btn.dataset.preset));
@@ -485,6 +631,9 @@ async function init() {
 
   document.getElementById("onlyNoMinSpend").addEventListener("change", runRecommendation);
   document.getElementById("runScrapeBtn").addEventListener("click", runScrape);
+  document.getElementById("customBankSelect").addEventListener("change", onCustomBankChange);
+  document.getElementById("customCardSelect").addEventListener("change", onCustomCardSelectChange);
+  document.getElementById("discoverBankCardsBtn").addEventListener("click", discoverMoreBankCards);
   document.getElementById("customScrapeForm").addEventListener("submit", runCustomScrape);
 
   // Default preset on load so user immediately sees rich recommendations

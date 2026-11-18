@@ -573,13 +573,46 @@ summary {
   color: #334155;
 }
 
-.field-group input {
+.field-group input,
+.field-group select {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 0.9rem;
   font-weight: 400;
   background: #fff;
+}
+
+.select-with-action {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.select-with-action select {
+  flex: 1 1 200px;
+}
+
+.btn-secondary {
+  background: #fff;
+  color: var(--primary);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  font-size: 0.84rem;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.btn-secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.hidden {
+  display: none;
 }
 
 .scrape-results {

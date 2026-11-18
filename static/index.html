@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>台灣信用卡回饋比較 & 常用通路推薦系統</title>
-  <link rel="stylesheet" href="/static/styles.css?v=3" />
+  <link rel="stylesheet" href="/static/styles.css?v=4" />
 </head>
 <body>
   <header class="hero">
@@ -105,25 +105,45 @@
         </div>
 
         <div class="scraper-controls custom-scrape-box">
-          <h4>指定卡片名稱爬取（支援新卡片或自訂官網）</h4>
+          <h4>指定卡片名稱爬取（先選台灣發卡銀行，再挑選或輸入卡片）</h4>
           <p class="hint">
-            輸入你想爬的信用卡名稱（例如：<code>富邦 J 卡</code>、<code>星展 eco 永續卡</code>、<code>CUBE 卡</code>）；若留空網址，系統會優先比對內建/資料庫網址或用 Playwright 搜尋定位官網。
+            忘記完整卡名時，可先從台灣銀行列表選擇發卡行，系統會自動列出該行信用卡供你直接點選；若清單沒有，也可點「從官網載入更多卡名」或手動輸入。
           </p>
           <form id="customScrapeForm" class="custom-scrape-form">
             <div class="custom-scrape-grid">
               <label class="field-group">
-                <span>信用卡名稱 *</span>
+                <span>1. 選擇發卡銀行</span>
+                <select id="customBankSelect">
+                  <option value="">-- 請選擇台灣發卡銀行 --</option>
+                </select>
+              </label>
+              <label class="field-group hidden" id="customBankManualWrap">
+                <span>自行輸入銀行名稱（選填）</span>
+                <input type="text" id="customBankName" placeholder="例：王道銀行" />
+              </label>
+              <div class="field-group">
+                <span>2. 選擇該銀行信用卡</span>
+                <div class="select-with-action">
+                  <select id="customCardSelect" disabled>
+                    <option value="">請先選擇左側發卡銀行</option>
+                  </select>
+                  <button type="button" id="discoverBankCardsBtn" class="btn btn-secondary" disabled>
+                    🔍 從官網載入更多卡名
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div id="bankDiscoverStatus" class="card-sub hidden"></div>
+            <div class="custom-scrape-grid">
+              <label class="field-group">
+                <span>3. 信用卡名稱（選取上方卡片自動帶入，或手動輸入）*</span>
                 <input type="text" id="customCardName" placeholder="例：富邦 J 卡 / 星展 eco 永續卡" required />
               </label>
               <label class="field-group">
-                <span>發卡銀行（選填）</span>
-                <input type="text" id="customBankName" placeholder="例：台北富邦 / 星展銀行" />
+                <span>官方介紹頁網址（選填，直接指定最準確）</span>
+                <input type="url" id="customCardUrl" placeholder="https://..." />
               </label>
             </div>
-            <label class="field-group">
-              <span>官方介紹頁網址（選填，直接指定最準確）</span>
-              <input type="url" id="customCardUrl" placeholder="https://..." />
-            </label>
             <button type="submit" id="runCustomScrapeBtn" class="btn btn-primary">依卡名啟動 Playwright 爬取</button>
           </form>
         </div>
@@ -144,6 +164,6 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

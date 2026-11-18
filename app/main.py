@@ -8,9 +8,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.catalog import (
+    discover_bank_cards_via_playwright,
+    list_bank_catalog,
+    list_cards_for_bank,
+)
 from app.channels import CHANNELS
 from app.db import get_card_by_slug, init_db, list_cards, list_scrape_logs, upsert_card
 from app.models import (
+    BankCardCatalogItem,
+    BankCatalogItem,
+    BankDiscoverResponse,
     CardIn,
     CardOut,
     CustomScrapeRequest,
@@ -92,6 +100,27 @@ def create_app(db_path: Optional[Path] = None) -> FastAPI:
     @application.get("/api/scrapers")
     def get_scrapers() -> List[Dict[str, str]]:
         return list_available_scrapers()
+
+    @application.get("/api/banks", response_model=List[BankCatalogItem])
+    def get_banks() -> List[BankCatalogItem]:
+        return list_bank_catalog(db_path=application.state.db_path)
+
+    @application.get("/api/banks/{bank_code}/cards", response_model=List[BankCardCatalogItem])
+    def get_bank_cards(bank_code: str) -> List[BankCardCatalogItem]:
+        cards = list_cards_for_bank(bank_code, db_path=application.state.db_path)
+        if cards is None:
+            raise HTTPException(status_code=404, detail="Bank not found")
+        return cards
+
+    @application.post("/api/banks/{bank_code}/discover", response_model=BankDiscoverResponse)
+    async def discover_bank_cards(bank_code: str) -> BankDiscoverResponse:
+        result = await discover_bank_cards_via_playwright(
+            bank_code,
+            db_path=application.state.db_path,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Bank not found")
+        return result
 
     @application.get("/api/scrape-logs")
     def get_scrape_logs(limit: int = 20) -> List[dict]:

@@ -155,3 +155,29 @@ class ScrapeResultItem(BaseModel):
 class ScrapeResponse(BaseModel):
     mode: str
     results: List[ScrapeResultItem]
+
+
+class BankCardCatalogItem(BaseModel):
+    card_name: str
+    bank_name: str
+    official_url: str = ""
+    in_db: bool = False
+    card_slug: Optional[str] = None
+    source_type: Optional[str] = None
+    last_updated: Optional[str] = None
+    catalog_source: str = "catalog"
+
+
+class BankCatalogItem(BaseModel):
+    bank_code: str
+    bank_name: str
+    list_url: str = ""
+    card_count: int = 0
+
+
+class BankDiscoverResponse(BaseModel):
+    bank_code: str
+    bank_name: str
+    status: str
+    message: str
+    cards: List[BankCardCatalogItem] = Field(default_factory=list)

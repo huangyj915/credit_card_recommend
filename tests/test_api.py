@@ -2,6 +2,8 @@
 
 from fastapi.testclient import TestClient
 
+from app.catalog import extract_card_candidates_from_links
+from app.db import upsert_directory_cards
 from app.main import create_app
 
 
@@ -53,3 +55,45 @@ def test_api_flow(tmp_path):
         assert custom_builtin.status_code == 200
         assert custom_builtin.json()["results"][0]["status"] == "success"
         assert custom_builtin.json()["results"][0]["card_slug"] == "cathay-cube"
+
+        banks = client.get("/api/banks")
+        assert banks.status_code == 200
+        banks_json = banks.json()
+        assert len(banks_json) >= 15
+        assert any(b["bank_code"] == "cathay" for b in banks_json)
+
+        upsert_directory_cards(
+            "dbs",
+            "星展銀行",
+            [{"card_name": "星展飛行世界商務卡", "official_url": "https://www.dbs.com.tw/example"}],
+            db_path=db_path,
+        )
+        dbs_cards = client.get("/api/banks/dbs/cards")
+        assert dbs_cards.status_code == 200
+        dbs_names = [c["card_name"] for c in dbs_cards.json()]
+        assert "星展 eco 永續卡" in dbs_names
+        assert "星展飛行世界商務卡" in dbs_names
+
+        cathay_cards = client.get("/api/banks/cathay/cards")
+        assert cathay_cards.status_code == 200
+        cube_entry = next(c for c in cathay_cards.json() if c["card_name"] == "CUBE 卡")
+        assert cube_entry["in_db"] is True
+
+        missing_bank = client.get("/api/banks/unknown-bank/cards")
+        assert missing_bank.status_code == 404
+
+
+def test_extract_card_candidates_from_links():
+    candidates = extract_card_candidates_from_links(
+        [
+            ("信用卡首頁", "/home"),
+            ("申辦信用卡", "/apply"),
+            ("星展 eco 永續卡", "/cards/eco"),
+            ("星展eco永續信用卡", "/cards/eco-dup"),
+            ("星展饗樂生活卡", "/cards/live"),
+        ],
+        "https://www.dbs.com.tw/personal-zh/cards/",
+    )
+    names = [c["card_name"] for c in candidates]
+    assert names == ["星展 eco 永續卡", "星展饗樂生活卡"]
+    assert candidates[0]["official_url"] == "https://www.dbs.com.tw/cards/eco"

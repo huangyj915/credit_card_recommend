@@ -76,6 +76,16 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 rules_count INTEGER NOT NULL DEFAULT 0,
                 scraped_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS bank_card_directory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bank_code TEXT NOT NULL,
+                bank_name TEXT NOT NULL,
+                card_name TEXT NOT NULL,
+                official_url TEXT NOT NULL DEFAULT '',
+                discovered_at TEXT NOT NULL,
+                UNIQUE(bank_code, card_name)
+            );
             """
         )
 
@@ -262,5 +272,50 @@ def list_scrape_logs(limit: int = 20, db_path: Optional[Path] = None) -> List[di
         rows = conn.execute(
             "SELECT * FROM scrape_logs ORDER BY id DESC LIMIT ?",
             (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def upsert_directory_cards(
+    bank_code: str,
+    bank_name: str,
+    entries: List[dict],
+    db_path: Optional[Path] = None,
+) -> None:
+    now = _utc_now_iso()
+    with get_connection(db_path) as conn:
+        for entry in entries:
+            card_name = (entry.get("card_name") or "").strip()
+            if not card_name:
+                continue
+            official_url = (entry.get("official_url") or "").strip()
+            conn.execute(
+                """
+                INSERT INTO bank_card_directory (
+                    bank_code, bank_name, card_name, official_url, discovered_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(bank_code, card_name) DO UPDATE SET
+                    bank_name = excluded.bank_name,
+                    official_url = CASE
+                        WHEN excluded.official_url != '' THEN excluded.official_url
+                        ELSE bank_card_directory.official_url
+                    END,
+                    discovered_at = excluded.discovered_at
+                """,
+                (bank_code, bank_name, card_name, official_url, now),
+            )
+
+
+def list_directory_cards(bank_code: str, db_path: Optional[Path] = None) -> List[dict]:
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT bank_code, bank_name, card_name, official_url, discovered_at
+            FROM bank_card_directory
+            WHERE bank_code = ?
+            ORDER BY id ASC
+            """,
+            (bank_code,),
         ).fetchall()
         return [dict(r) for r in rows]
