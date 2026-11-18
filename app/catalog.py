@@ -7,7 +7,11 @@ from urllib.parse import urljoin
 
 from playwright.async_api import async_playwright
 
-from app.db import list_cards, list_directory_cards, upsert_directory_cards
+from app.db import (
+    list_cards,
+    list_directory_cards,
+    replace_directory_cards,
+)
 from app.models import BankCardCatalogItem, BankCatalogItem, BankDiscoverResponse
 from app.scrapers.base import detect_discontinued_marker
 from app.scrapers.manager import USER_AGENT, _launch_browser
@@ -322,7 +326,121 @@ GENERIC_NAV_LABELS = {
     "卡友權益",
     "聯名卡",
     "商務卡",
+    "雙幣卡",
+    "金卡/普卡",
+    "白金卡",
+    "推薦卡片",
+    "熱門卡片",
+    "精選卡片",
+    "整併卡",
+    "停發卡",
+    "附卡",
 }
+
+NON_CARD_KEYWORDS = (
+    "掛失",
+    "登錄",
+    "理財",
+    "分期",
+    "繳費",
+    "帳單",
+    "客服",
+    "常見問題",
+    "優惠",
+    "活動",
+    "紅利",
+    "點數",
+    "小樹點",
+    "推薦卡",
+    "熱門卡",
+    "精選卡",
+    "所有卡",
+    "全部卡",
+    "整併卡",
+    "簽帳金融卡",
+    "金融卡",
+    "debit",
+    "預借現金",
+    "額度",
+    "密碼",
+    "開卡",
+    "年費",
+    "循環利率",
+    "注意事項",
+    "權益",
+    "總覽",
+    "說明",
+    "申請",
+    "申辦",
+    "查詢",
+    "更多",
+    "介紹",
+    "首頁",
+    "專區",
+    "服務",
+    "比較",
+    "升級為",
+)
+
+NON_CARD_URL_TOKENS = (
+    "reportlost",
+    "lostcard",
+    "loan",
+    "bonus",
+    "point",
+    "promotion",
+    "event",
+    "faq",
+    "fee",
+    "interest",
+    "login",
+    "service",
+    "debit",
+    "discontinued",
+    "stop-issue",
+    "stop_issue",
+)
+
+SENTENCE_PUNCTUATION_RE = re.compile(r"[？?!！。，,;；]")
+
+
+def is_valid_active_card_candidate(
+    card_name: str,
+    official_url: str = "",
+    context: str = "",
+    require_url: bool = False,
+) -> bool:
+    """Return True only when a candidate looks like an actual active credit card product."""
+    text = re.sub(r"\s+", " ", (card_name or "")).strip()
+    if not text or len(text) < 2 or len(text) > 24:
+        return False
+    if text in GENERIC_NAV_LABELS:
+        return False
+    if SENTENCE_PUNCTUATION_RE.search(text):
+        return False
+    if "卡" not in text and "card" not in text.lower():
+        return False
+
+    lowered = text.lower()
+    if any(kw in lowered for kw in NON_CARD_KEYWORDS):
+        return False
+
+    if (
+        detect_discontinued_marker(text)
+        or detect_discontinued_marker(official_url)
+        or detect_discontinued_marker(context)
+    ):
+        return False
+
+    cleaned_url = (official_url or "").strip()
+    if require_url and not cleaned_url:
+        return False
+    if cleaned_url:
+        url_lower = cleaned_url.lower()
+        if any(tok in url_lower for tok in NON_CARD_URL_TOKENS):
+            return False
+
+    return True
 
 
 def normalize_card_query(text: str) -> str:
@@ -362,7 +480,11 @@ def list_cards_for_bank(
 
     # 2. Cards previously discovered via Playwright from the bank's overview page
     for row in list_directory_cards(bank_code, db_path=db_path):
-        if detect_discontinued_marker(row["card_name"]) or detect_discontinued_marker(row.get("official_url") or ""):
+        if not is_valid_active_card_candidate(
+            row["card_name"],
+            row.get("official_url") or "",
+            require_url=True,
+        ):
             continue
         key = normalize_card_query(row["card_name"])
         existing = merged.get(key)
@@ -416,8 +538,9 @@ def list_bank_catalog(db_path: Optional[Path] = None) -> List[BankCatalogItem]:
 def extract_card_candidates_from_links(
     links: List[Tuple[str, ...]],
     base_url: str,
+    require_url: bool = False,
 ) -> List[Dict[str, str]]:
-    """Filter raw (text, href[, context]) tuples from a bank overview page, excluding discontinued cards."""
+    """Filter raw (text, href[, context]) tuples into actual active credit card products."""
     results: List[Dict[str, str]] = []
     seen = set()
 
@@ -427,18 +550,15 @@ def extract_card_candidates_from_links(
         raw_context = item[2] if len(item) > 2 else ""
 
         text = re.sub(r"\s+", " ", (raw_text or "")).strip()
-        if not text or len(text) < 2 or len(text) > 32:
-            continue
-        if text in GENERIC_NAV_LABELS:
-            continue
-        if "卡" not in text and "card" not in text.lower():
-            continue
-        if any(noise in text for noise in ("注意事項", "權益", "總覽", "說明", "申請", "申辦", "查詢", "客服", "更多")):
-            continue
-        if (
-            detect_discontinued_marker(text)
-            or detect_discontinued_marker(raw_href)
-            or detect_discontinued_marker(raw_context)
+        resolved_url = ""
+        if raw_href and not raw_href.startswith(("javascript:", "#")):
+            resolved_url = urljoin(base_url, raw_href)
+
+        if not is_valid_active_card_candidate(
+            text,
+            resolved_url,
+            context=raw_context,
+            require_url=require_url,
         ):
             continue
 
@@ -446,10 +566,6 @@ def extract_card_candidates_from_links(
         if not norm or norm in seen:
             continue
         seen.add(norm)
-
-        resolved_url = ""
-        if raw_href and not raw_href.startswith(("javascript:", "#")):
-            resolved_url = urljoin(base_url, raw_href)
 
         results.append({"card_name": text, "official_url": resolved_url})
 
@@ -487,21 +603,46 @@ async def discover_bank_cards_via_playwright(
 
                 raw_pairs = await page.evaluate(
                     """() => {
-                        const nodes = Array.from(document.querySelectorAll("a, h2, h3, h4, [class*='card-title'], [class*='card_name']")).slice(0, 250);
-                        return nodes.map((el) => {
-                            const text = (el.innerText || "").trim();
-                            const href = el.getAttribute("href") || "";
-                            const cardBox = el.closest("li, article, [class*='card'], [class*='item'], section");
-                            const boxText = cardBox ? (cardBox.innerText || "").slice(0, 180) : "";
-                            const sectionHeading = el.closest("section")?.querySelector("h1, h2, h3")?.innerText || "";
-                            return [text, href, `${sectionHeading} ${boxText}`.trim()];
-                        });
+                        const isNavChrome = (el) => Boolean(
+                            el.closest("header, nav, footer, [role='navigation'], [class*='header'], [class*='footer'], [class*='nav']")
+                        );
+                        const pickCardHref = (el, cardBox) => {
+                            const ownHref = el.getAttribute("href") || "";
+                            if (ownHref && !ownHref.startsWith("#") && !ownHref.startsWith("javascript:")) {
+                                return ownHref;
+                            }
+                            if (!cardBox) return "";
+                            const links = Array.from(cardBox.querySelectorAll("a[href]"))
+                                .map((a) => ({
+                                    href: a.getAttribute("href") || "",
+                                    txt: (a.innerText || "").trim(),
+                                }))
+                                .filter((x) => x.href && !x.href.startsWith("#") && !x.href.startsWith("javascript:"));
+                            const detail = links.find((x) => !/申辦|apply/i.test(x.txt + x.href));
+                            return (detail || links[0] || {}).href || "";
+                        };
+
+                        const nodes = Array.from(
+                            document.querySelectorAll("main a, [role='main'] a, article a, [class*='card'] a, [class*='card'] h2, [class*='card'] h3, [class*='card'] h4, [class*='card-title'], [class*='card_name']")
+                        ).slice(0, 300);
+
+                        return nodes
+                            .filter((el) => !isNavChrome(el))
+                            .map((el) => {
+                                const firstLine = (el.innerText || "").split(/\\r?\\n/)[0].trim();
+                                const cardBox = el.closest("li, article, [class*='card'], [class*='item'], [class*='box']");
+                                const href = pickCardHref(el, cardBox);
+                                const boxText = cardBox ? (cardBox.innerText || "").slice(0, 180) : "";
+                                const sectionHeading = el.closest("section")?.querySelector("h1, h2, h3")?.innerText || "";
+                                return [firstLine, href, `${sectionHeading} ${boxText}`.trim()];
+                            });
                     }"""
                 )
 
                 discovered = extract_card_candidates_from_links(
                     [tuple(pair) for pair in raw_pairs],
                     list_url,
+                    require_url=True,
                 )
             finally:
                 await page.close()
@@ -527,7 +668,7 @@ async def discover_bank_cards_via_playwright(
             cards=cards,
         )
 
-    upsert_directory_cards(bank_code, bank_name, discovered, db_path=db_path)
+    replace_directory_cards(bank_code, bank_name, discovered, db_path=db_path)
     cards = list_cards_for_bank(bank_code, db_path=db_path) or []
     return BankDiscoverResponse(
         bank_code=bank_code,

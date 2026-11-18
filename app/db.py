@@ -319,3 +319,14 @@ def list_directory_cards(bank_code: str, db_path: Optional[Path] = None) -> List
             (bank_code,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def replace_directory_cards(
+    bank_code: str,
+    bank_name: str,
+    entries: List[dict],
+    db_path: Optional[Path] = None,
+) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute("DELETE FROM bank_card_directory WHERE bank_code = ?", (bank_code,))
+    upsert_directory_cards(bank_code, bank_name, entries, db_path=db_path)

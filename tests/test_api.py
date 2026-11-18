@@ -88,6 +88,15 @@ def test_extract_card_candidates_from_links():
         [
             ("信用卡首頁", "/home"),
             ("申辦信用卡", "/apply"),
+            ("熱門卡片", ""),
+            ("推薦卡片", ""),
+            ("掛失信用卡", "/reportlostcard.html"),
+            ("卡友登錄專區", "/promotion"),
+            ("卡友理財服務", "/loan.html"),
+            ("小樹點(信用卡)", "/bonus.html"),
+            ("CUBE 簽帳金融卡", "/debit/cube"),
+            ("您知道這些卡片已經升級為CUBE卡了嗎？", ""),
+            ("亞洲萬里通聯名卡 早刷這張，換里出發", "/asia-miles"),
             ("星展 eco 永續卡", "/cards/eco"),
             ("星展eco永續信用卡", "/cards/eco-dup"),
             ("星展饗樂生活卡", "/cards/live"),
@@ -96,6 +105,7 @@ def test_extract_card_candidates_from_links():
             ("另一張停辦卡", "/cards/discontinued/abc", ""),
         ],
         "https://www.dbs.com.tw/personal-zh/cards/",
+        require_url=True,
     )
     names = [c["card_name"] for c in candidates]
     assert names == ["星展 eco 永續卡", "星展饗樂生活卡"]
