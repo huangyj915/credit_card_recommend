@@ -4,3 +4,8 @@ services:
     runtime: docker
     plan: free
     healthCheckPath: /api/health
+    envVars:
+      - key: PUBLIC_READONLY
+        value: "true"
+      - key: DISABLE_DOCS
+        value: "false"

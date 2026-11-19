@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_CHANNEL=bundled
 
 WORKDIR /app
 
@@ -13,7 +14,13 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY . .
 
-RUN mkdir -p /app/data
+RUN groupadd --system appuser \
+    && useradd --system --gid appuser --create-home appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app/data \
+    && chmod -R a+rX /ms-playwright
+
+USER appuser
 
 EXPOSE 8000
 

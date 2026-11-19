@@ -4,7 +4,12 @@ from typing import Dict, List, Optional
 from playwright.async_api import Page
 
 from app.models import CardIn
-from app.scrapers.base import BaseBankScraper, build_rules_from_blocks, extract_percentage
+from app.scrapers.base import (
+    BaseBankScraper,
+    build_rules_from_blocks,
+    collect_dom_text_blocks,
+    extract_percentage,
+)
 
 
 class EsunUBearScraper(BaseBankScraper):
@@ -35,20 +40,21 @@ class EsunUBearScraper(BaseBankScraper):
     """
 
     async def parse_page(self, page: Page, source_type: str = "scraped") -> CardIn:
-        blocks: List[Dict[str, Optional[str]]] = []
-
-        items = page.locator(".benefit-item, section, article, li, [class*='feature'], [class*='benefit']")
-        count = min(await items.count(), 80)
-        for i in range(count):
-            text = (await items.nth(i).inner_text()).strip()
-            if "%" not in text or len(text) > 400:
-                continue
-            blocks.append({"plan_name": None, "title": "", "text": text})
+        raw_texts = await collect_dom_text_blocks(
+            page,
+            ".benefit-item, section, article, li, [class*='feature'], [class*='benefit']",
+            max_items=80,
+        )
+        blocks: List[Dict[str, Optional[str]]] = [
+            {"plan_name": None, "title": "", "text": text} for text in raw_texts
+        ]
 
         base_domestic = 1.0
-        base_loc = page.locator(".base-rate").first
-        if await base_loc.count() > 0:
-            parsed = extract_percentage(await base_loc.inner_text())
+        base_text = await page.evaluate(
+            "() => (document.querySelector('.base-rate')?.innerText || document.querySelector('.base-rate')?.textContent || '').trim()"
+        )
+        if base_text:
+            parsed = extract_percentage(base_text)
             if parsed is not None:
                 base_domestic = parsed
 

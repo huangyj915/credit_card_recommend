@@ -6,16 +6,23 @@ from typing import Dict, List, Optional, Tuple
 import unicodedata
 from urllib.parse import urljoin
 
-from playwright.async_api import async_playwright
+from playwright.async_api import Page
 
 from app.db import (
     list_cards,
     list_directory_cards,
+    load_catalog_snapshot,
     replace_directory_cards,
 )
-from app.models import BankCardCatalogItem, BankCatalogItem, BankDiscoverResponse
-from app.scrapers.base import detect_discontinued_marker
-from app.scrapers.manager import USER_AGENT, _launch_browser, get_playwright_semaphore
+from app.i18n import (
+    normalize_lang,
+    t_backend,
+    translate_bank_name,
+    translate_card_name,
+)
+from app.models import BankCardCatalogItem, BankCatalogItem, BankDiscoverResponse, CardOut
+from app.scrapers.base import detect_discontinued_marker, navigate_and_wait
+from app.scrapers.manager import ScraperBusyError, open_scraper_page
 
 # Curated Taiwan issuing banks and representative credit cards.
 # Only verified official URLs are pre-populated; others can be discovered via Playwright.
@@ -137,7 +144,7 @@ TAIWAN_BANKS: List[Dict] = [
         "cards": [
             {
                 "card_name": "富邦 J 卡",
-                "official_url": "https://www.fubon.com/banking/personal/credit_card/all_card/jcard/jcard.htm",
+                "official_url": "https://www.fubon.com/banking/personal/credit_card/all_card/omiyage/omiyage.htm",
             },
             {
                 "card_name": "Costco 聯名卡",
@@ -229,7 +236,7 @@ TAIWAN_BANKS: List[Dict] = [
         "cards": [
             {
                 "card_name": "吉鶴卡",
-                "official_url": "https://card.ubot.com.tw/eCard/Activity/jihe/",
+                "official_url": "https://card.ubot.com.tw/CardDetail/cardDetail202",
             },
             {
                 "card_name": "聯邦賴點卡",
@@ -655,15 +662,12 @@ def _bank_card_dedup_key(card_name: str, bank_name: str) -> str:
     return key
 
 
-def list_cards_for_bank(
-    bank_code: str,
-    db_path: Optional[Path] = None,
-) -> Optional[List[BankCardCatalogItem]]:
-    """Return merged card catalog for a bank (DB cards + Playwright-discovered + built-in)."""
-    bank = BANK_BY_CODE.get(bank_code)
-    if bank is None:
-        return None
-
+def _merge_cards_for_bank(
+    bank: Dict,
+    directory_rows: List[dict],
+    all_db_cards: List[CardOut],
+    resolved_lang: str,
+) -> List[BankCardCatalogItem]:
     bank_name = bank["bank_name"]
     merged: Dict[str, BankCardCatalogItem] = {}
 
@@ -679,7 +683,7 @@ def list_cards_for_bank(
         )
 
     # 2. Cards previously discovered via Playwright from the bank's overview page
-    for row in list_directory_cards(bank_code, db_path=db_path):
+    for row in directory_rows:
         if not is_valid_active_card_candidate(
             row["card_name"],
             row.get("official_url") or "",
@@ -701,7 +705,7 @@ def list_cards_for_bank(
             existing.catalog_source = "discovered"
 
     # 3. Cards already stored in SQLite cards table (highest priority)
-    for card in list_cards(db_path=db_path):
+    for card in all_db_cards:
         if not _bank_matches(card.bank_name, bank_name):
             continue
         key = _bank_card_dedup_key(card.card_name, bank_name)
@@ -716,18 +720,46 @@ def list_cards_for_bank(
             catalog_source="db",
         )
 
-    return list(merged.values())
+    items = list(merged.values())
+    if resolved_lang == "en":
+        for item in items:
+            item.card_name = translate_card_name(item.card_name, resolved_lang)
+            item.bank_name = translate_bank_name(item.bank_name, resolved_lang)
+    return items
 
 
-def list_bank_catalog(db_path: Optional[Path] = None) -> List[BankCatalogItem]:
-    """Return all Taiwan issuing banks with current card counts."""
+def list_cards_for_bank(
+    bank_code: str,
+    db_path: Optional[Path] = None,
+    lang: Optional[str] = None,
+) -> Optional[List[BankCardCatalogItem]]:
+    """Return merged card catalog for a bank (DB cards + Playwright-discovered + built-in)."""
+    bank = BANK_BY_CODE.get(bank_code)
+    if bank is None:
+        return None
+
+    resolved_lang = normalize_lang(lang)
+    directory_rows = list_directory_cards(bank_code, db_path=db_path)
+    all_db_cards = list_cards(db_path=db_path)
+    return _merge_cards_for_bank(bank, directory_rows, all_db_cards, resolved_lang)
+
+
+def list_bank_catalog(db_path: Optional[Path] = None, lang: Optional[str] = None) -> List[BankCatalogItem]:
+    """Return all Taiwan issuing banks with current card counts using a single DB snapshot."""
+    resolved_lang = normalize_lang(lang)
+    all_db_cards, dir_by_bank = load_catalog_snapshot(db_path=db_path)
     items: List[BankCatalogItem] = []
     for bank in TAIWAN_BANKS:
-        cards = list_cards_for_bank(bank["bank_code"], db_path=db_path) or []
+        cards = _merge_cards_for_bank(
+            bank,
+            dir_by_bank.get(bank["bank_code"], []),
+            all_db_cards,
+            "zh-TW",
+        )
         items.append(
             BankCatalogItem(
                 bank_code=bank["bank_code"],
-                bank_name=bank["bank_name"],
+                bank_name=translate_bank_name(bank["bank_name"], resolved_lang),
                 list_url=bank["list_url"],
                 card_count=len(cards),
             )
@@ -794,145 +826,204 @@ def _filter_bank_links(
     return extract_card_candidates_from_links(filtered, base_url, require_url=True)
 
 
+async def discover_bank_cards_on_page(
+    page: Page,
+    bank_code: str,
+    db_path: Optional[Path] = None,
+    lang: Optional[str] = None,
+) -> Optional[BankDiscoverResponse]:
+    """Discover active cards for bank_code using an already-open Playwright Page."""
+    bank = BANK_BY_CODE.get(bank_code)
+    if bank is None:
+        return None
+
+    resolved_lang = normalize_lang(lang)
+    list_urls: List[str] = bank.get("list_urls") or [bank["list_url"]]
+    link_include: List[str] = bank.get("link_include") or []
+    link_exclude: List[str] = bank.get("link_exclude") or []
+    bank_name = bank["bank_name"]
+    display_bank_name = translate_bank_name(bank_name, resolved_lang)
+    discovered: List[Dict[str, str]] = []
+    seen_norms = set()
+    page_errors: List[Exception] = []
+
+    for page_url in list_urls:
+        try:
+            await navigate_and_wait(page, page_url, timeout_ms=20000)
+
+            raw_pairs = await page.evaluate(
+                """(hasLinkFilter) => {
+                    const isNavChrome = (el) => Boolean(
+                        el.closest("header, nav, footer, [role='navigation']")
+                    );
+                    const genericLinkRe = /^(了解更多|瞭解更多|詳細介紹|信用卡介紹|卡片介紹|看更多|立即查看|更多資訊)$/;
+                    const findCardBox = (el) => {
+                        let cur = el.parentElement;
+                        while (cur && cur !== document.body) {
+                            if (cur.matches("li, article, [class*='card-list'], [class*='list-box'], [class*='card-item'], [class*='card_item'], [class*='card-box'], [class*='card-wrap'], [class*='product'], [class*='item'], [class*='box']")) {
+                                if (cur.querySelector("a[href]")) return cur;
+                            }
+                            cur = cur.parentElement;
+                        }
+                        return el.closest("section");
+                    };
+                    const pickCardHref = (el, cardBox) => {
+                        const ownHref = el.getAttribute("href") || "";
+                        if (ownHref && !ownHref.startsWith("#") && !ownHref.startsWith("javascript:")) {
+                            return ownHref;
+                        }
+                        if (!cardBox) return "";
+                        const links = Array.from(cardBox.querySelectorAll("a[href]"))
+                            .map((a) => ({
+                                href: a.getAttribute("href") || "",
+                                txt: (a.innerText || "").trim(),
+                            }))
+                            .filter((x) => x.href && !x.href.startsWith("#") && !x.href.startsWith("javascript:"));
+                        const detail = links.find((x) => !/申辦|申請|apply/i.test(x.txt + x.href));
+                        return (detail || links[0] || {}).href || "";
+                    };
+                    const pickCardName = (el, cardBox) => {
+                        const firstLine = (el.innerText || "").split(/\\r?\\n/)[0].replace(/\\s+/g, " ").trim();
+                        const boxTitle = cardBox
+                            ? (cardBox.querySelector("h1, h2, h3, h4, [class*='card-title'], [class*='card_name'], [class*='title'], [class*='name']")?.innerText || "")
+                                .split(/\\r?\\n/)[0]
+                                .replace(/\\s+/g, " ")
+                                .trim()
+                            : "";
+                        if ((!firstLine || genericLinkRe.test(firstLine) || firstLine.length > 24) && boxTitle) {
+                            return boxTitle;
+                        }
+                        return firstLine;
+                    };
+
+                    const selector = hasLinkFilter
+                        ? "a[href]"
+                        : "main a, [role='main'] a, article a, [class*='card'] a, [class*='card'] h2, [class*='card'] h3, [class*='card'] h4, [class*='card-title'], [class*='card_name'], [class*='list-box'] p[class*='title'], [class*='list'] a";
+                    const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 450);
+
+                    return nodes
+                        .filter((el) => !isNavChrome(el))
+                        .map((el) => {
+                            const cardBox = findCardBox(el);
+                            const name = pickCardName(el, cardBox);
+                            const href = pickCardHref(el, cardBox);
+                            const boxText = cardBox ? (cardBox.innerText || "").slice(0, 180) : "";
+                            const sectionHeading = el.closest("section")?.querySelector("h1, h2, h3")?.innerText || "";
+                            return [name, href, `${sectionHeading} ${boxText}`.trim()];
+                        });
+                }""",
+                bool(link_include),
+            )
+
+            page_items = _filter_bank_links(
+                [tuple(pair) for pair in raw_pairs],
+                page_url,
+                link_include,
+                link_exclude,
+            )
+            for item in page_items:
+                norm = normalize_card_query(item["card_name"])
+                if norm and norm not in seen_norms:
+                    seen_norms.add(norm)
+                    discovered.append(item)
+        except Exception as page_exc:
+            page_errors.append(page_exc)
+
+    if not discovered and page_errors and len(page_errors) == len(list_urls):
+        exc = page_errors[0]
+        cards = list_cards_for_bank(bank_code, db_path=db_path, lang=resolved_lang) or []
+        return BankDiscoverResponse(
+            bank_code=bank_code,
+            bank_name=display_bank_name,
+            status="error",
+            message=(
+                t_backend(
+                    "discover_error",
+                    resolved_lang,
+                    bank_name=display_bank_name,
+                    err=type(exc).__name__,
+                    count=len(cards),
+                )
+                if resolved_lang == "en"
+                else f"無法連線擷取「{bank_name}」官網卡片清單（{type(exc).__name__}），已保留現有清單。"
+            ),
+            cards=cards,
+        )
+
+    if not discovered:
+        cards = list_cards_for_bank(bank_code, db_path=db_path, lang=resolved_lang) or []
+        return BankDiscoverResponse(
+            bank_code=bank_code,
+            bank_name=display_bank_name,
+            status="warning",
+            message=(
+                t_backend(
+                    "discover_empty",
+                    resolved_lang,
+                    bank_name=display_bank_name,
+                    count=len(cards),
+                )
+                if resolved_lang == "en"
+                else f"已開啟「{bank_name}」官網但未解析出額外卡名（可能為動態渲染或防爬限制），已保留現有清單。"
+            ),
+            cards=cards,
+        )
+
+    replace_directory_cards(bank_code, bank_name, discovered, db_path=db_path)
+    cards = list_cards_for_bank(bank_code, db_path=db_path, lang=resolved_lang) or []
+    return BankDiscoverResponse(
+        bank_code=bank_code,
+        bank_name=display_bank_name,
+        status="success",
+        message=(
+            t_backend(
+                "discover_success",
+                resolved_lang,
+                bank_name=display_bank_name,
+                count=len(discovered),
+            )
+            if resolved_lang == "en"
+            else f"已從「{bank_name}」官網擷取 {len(discovered)} 張卡片名稱並合併至清單。"
+        ),
+        cards=cards,
+    )
+
+
 async def discover_bank_cards_via_playwright(
     bank_code: str,
     db_path: Optional[Path] = None,
+    lang: Optional[str] = None,
 ) -> Optional[BankDiscoverResponse]:
     """Use Playwright Chromium to fetch additional active card names from the bank's overview page."""
     bank = BANK_BY_CODE.get(bank_code)
     if bank is None:
         return None
 
-    list_urls: List[str] = bank.get("list_urls") or [bank["list_url"]]
-    link_include: List[str] = bank.get("link_include") or []
-    link_exclude: List[str] = bank.get("link_exclude") or []
+    resolved_lang = normalize_lang(lang)
     bank_name = bank["bank_name"]
-    discovered: List[Dict[str, str]] = []
-    seen_norms = set()
+    display_bank_name = translate_bank_name(bank_name, resolved_lang)
 
     try:
-        async with get_playwright_semaphore():
-            async with async_playwright() as p:
-                browser = await _launch_browser(p)
-                context = await browser.new_context(
-                    user_agent=USER_AGENT,
-                    locale="zh-TW",
-                    viewport={"width": 1280, "height": 900},
-                )
-                page = await context.new_page()
-                try:
-                    for page_url in list_urls:
-                        await page.goto(page_url, wait_until="domcontentloaded", timeout=20000)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=5000)
-                        except Exception:
-                            pass
-
-                        raw_pairs = await page.evaluate(
-                            """(hasLinkFilter) => {
-                                const isNavChrome = (el) => Boolean(
-                                    el.closest("header, nav, footer, [role='navigation']")
-                                );
-                                const genericLinkRe = /^(了解更多|瞭解更多|詳細介紹|信用卡介紹|卡片介紹|看更多|立即查看|更多資訊)$/;
-                                const findCardBox = (el) => {
-                                    let cur = el.parentElement;
-                                    while (cur && cur !== document.body) {
-                                        if (cur.matches("li, article, [class*='card-list'], [class*='list-box'], [class*='card-item'], [class*='card_item'], [class*='card-box'], [class*='card-wrap'], [class*='product'], [class*='item'], [class*='box']")) {
-                                            if (cur.querySelector("a[href]")) return cur;
-                                        }
-                                        cur = cur.parentElement;
-                                    }
-                                    return el.closest("section");
-                                };
-                                const pickCardHref = (el, cardBox) => {
-                                    const ownHref = el.getAttribute("href") || "";
-                                    if (ownHref && !ownHref.startsWith("#") && !ownHref.startsWith("javascript:")) {
-                                        return ownHref;
-                                    }
-                                    if (!cardBox) return "";
-                                    const links = Array.from(cardBox.querySelectorAll("a[href]"))
-                                        .map((a) => ({
-                                            href: a.getAttribute("href") || "",
-                                            txt: (a.innerText || "").trim(),
-                                        }))
-                                        .filter((x) => x.href && !x.href.startsWith("#") && !x.href.startsWith("javascript:"));
-                                    const detail = links.find((x) => !/申辦|申請|apply/i.test(x.txt + x.href));
-                                    return (detail || links[0] || {}).href || "";
-                                };
-                                const pickCardName = (el, cardBox) => {
-                                    const firstLine = (el.innerText || "").split(/\\r?\\n/)[0].replace(/\\s+/g, " ").trim();
-                                    const boxTitle = cardBox
-                                        ? (cardBox.querySelector("h1, h2, h3, h4, [class*='card-title'], [class*='card_name'], [class*='title'], [class*='name']")?.innerText || "")
-                                            .split(/\\r?\\n/)[0]
-                                            .replace(/\\s+/g, " ")
-                                            .trim()
-                                        : "";
-                                    if ((!firstLine || genericLinkRe.test(firstLine) || firstLine.length > 24) && boxTitle) {
-                                        return boxTitle;
-                                    }
-                                    return firstLine;
-                                };
-
-                                const selector = hasLinkFilter
-                                    ? "a[href]"
-                                    : "main a, [role='main'] a, article a, [class*='card'] a, [class*='card'] h2, [class*='card'] h3, [class*='card'] h4, [class*='card-title'], [class*='card_name'], [class*='list-box'] p[class*='title'], [class*='list'] a";
-                                const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 450);
-
-                                return nodes
-                                    .filter((el) => !isNavChrome(el))
-                                    .map((el) => {
-                                        const cardBox = findCardBox(el);
-                                        const name = pickCardName(el, cardBox);
-                                        const href = pickCardHref(el, cardBox);
-                                        const boxText = cardBox ? (cardBox.innerText || "").slice(0, 180) : "";
-                                        const sectionHeading = el.closest("section")?.querySelector("h1, h2, h3")?.innerText || "";
-                                        return [name, href, `${sectionHeading} ${boxText}`.trim()];
-                                    });
-                            }""",
-                            bool(link_include),
-                        )
-
-                        page_items = _filter_bank_links(
-                            [tuple(pair) for pair in raw_pairs],
-                            page_url,
-                            link_include,
-                            link_exclude,
-                        )
-                        for item in page_items:
-                            norm = normalize_card_query(item["card_name"])
-                            if norm and norm not in seen_norms:
-                                seen_norms.add(norm)
-                                discovered.append(item)
-                finally:
-                    await page.close()
-                    await context.close()
-                    await browser.close()
+        async with open_scraper_page() as page:
+            return await discover_bank_cards_on_page(page, bank_code, db_path=db_path, lang=resolved_lang)
+    except ScraperBusyError:
+        raise
     except Exception as exc:
-        cards = list_cards_for_bank(bank_code, db_path=db_path) or []
+        cards = list_cards_for_bank(bank_code, db_path=db_path, lang=resolved_lang) or []
         return BankDiscoverResponse(
             bank_code=bank_code,
-            bank_name=bank_name,
+            bank_name=display_bank_name,
             status="error",
-            message=f"無法連線擷取「{bank_name}」官網卡片清單（{type(exc).__name__}），已保留現有清單。",
+            message=(
+                t_backend(
+                    "discover_error",
+                    resolved_lang,
+                    bank_name=display_bank_name,
+                    err=type(exc).__name__,
+                    count=len(cards),
+                )
+                if resolved_lang == "en"
+                else f"無法連線擷取「{bank_name}」官網卡片清單（{type(exc).__name__}），已保留現有清單。"
+            ),
             cards=cards,
         )
-
-    if not discovered:
-        cards = list_cards_for_bank(bank_code, db_path=db_path) or []
-        return BankDiscoverResponse(
-            bank_code=bank_code,
-            bank_name=bank_name,
-            status="warning",
-            message=f"已開啟「{bank_name}」官網但未解析出額外卡名（可能為動態渲染或防爬限制），已保留現有清單。",
-            cards=cards,
-        )
-
-    replace_directory_cards(bank_code, bank_name, discovered, db_path=db_path)
-    cards = list_cards_for_bank(bank_code, db_path=db_path) or []
-    return BankDiscoverResponse(
-        bank_code=bank_code,
-        bank_name=bank_name,
-        status="success",
-        message=f"已從「{bank_name}」官網擷取 {len(discovered)} 張卡片名稱並合併至清單。",
-        cards=cards,
-    )

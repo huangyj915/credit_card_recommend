@@ -7,6 +7,12 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 256
     environment:
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
       - PUBLIC_READONLY=${PUBLIC_READONLY:-false}

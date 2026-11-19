@@ -2,35 +2,50 @@
 
 import base64
 import hashlib
-import ipaddress
+import logging
 from pathlib import Path
 import re
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote_plus, urlparse
 
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import Page
 
 from app.catalog import (
     NON_CARD_URL_TOKENS,
     TAIWAN_BANKS,
     TAIWAN_BANK_HINTS,
-    discover_bank_cards_via_playwright,
+    discover_bank_cards_on_page,
     list_cards_for_bank,
     normalize_card_query,
 )
 from app.db import list_cards, log_scrape, upsert_card
+from app.i18n import (
+    canonicalize_bank_name,
+    canonicalize_card_name,
+    normalize_lang,
+    t_backend,
+    translate_bank_name,
+    translate_card_name,
+)
 from app.models import CardIn, CardOut, ScrapeResultItem
 from app.scrapers.base import (
     build_rules_from_blocks,
     check_page_discontinued,
+    collect_dom_text_blocks,
     detect_discontinued_marker,
+    expand_hidden_tabs,
     extract_percentage,
+    is_non_reward_snippet,
+    navigate_and_wait,
+    summarize_scraper_error,
+    validate_public_http_url,
 )
+
+logger = logging.getLogger(__name__)
 from app.scrapers.manager import (
     SCRAPER_REGISTRY,
-    USER_AGENT,
-    _launch_browser,
-    get_playwright_semaphore,
+    ScraperBusyError,
+    open_scraper_page,
 )
 
 SEARCH_BLOCK_MARKERS = (
@@ -53,32 +68,6 @@ def build_custom_card_slug(card_name: str, bank_name: Optional[str] = None) -> s
     return f"custom-{digest}"
 
 
-def validate_public_http_url(raw_url: str) -> Tuple[bool, str]:
-    """Ensure a URL is a public http(s) address and not a local/private target."""
-    try:
-        parsed = urlparse(raw_url.strip())
-    except ValueError:
-        return False, "網址格式不正確"
-
-    if parsed.scheme not in ("http", "https"):
-        return False, "僅支援 http 或 https 開頭的網址"
-
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return False, "網址缺少主機名稱"
-    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local"):
-        return False, "不允許存取本機或內部網路網址"
-
-    try:
-        ip = ipaddress.ip_address(host)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            return False, "不允許存取私有或保留 IP 網址"
-    except ValueError:
-        pass
-
-    return True, ""
-
-
 def infer_bank_name(url: str, page_title: str, explicit_bank: Optional[str]) -> str:
     """Infer Taiwan bank name from explicit input, URL domain, or page title."""
     if explicit_bank and explicit_bank.strip():
@@ -92,6 +81,10 @@ def infer_bank_name(url: str, page_title: str, explicit_bank: Optional[str]) -> 
     return "自訂銀行"
 
 
+def _bank_name_compatible(bank_query: str, bank_target: str) -> bool:
+    return not bank_query or bank_query in bank_target or bank_target in bank_query
+
+
 def match_builtin_scraper_code(card_name: str, bank_name: Optional[str] = None) -> Optional[str]:
     """Return matching SCRAPER_REGISTRY key if card_name refers to a dedicated scraper."""
     query = normalize_card_query(card_name)
@@ -99,11 +92,24 @@ def match_builtin_scraper_code(card_name: str, bank_name: Optional[str] = None) 
     if not query:
         return None
 
+    # 1. Exact match first
     for code, scraper in SCRAPER_REGISTRY.items():
         target = normalize_card_query(scraper.card_name)
         bank_target = normalize_card_query(scraper.bank_name)
-        if target and (target in query or query in target):
-            if not bank_query or bank_query in bank_target or bank_target in bank_query:
+        if target and target == query and _bank_name_compatible(bank_query, bank_target):
+            return code
+
+    # 2. Substring fallback only with >= 3-char minimum overlap
+    if len(query) >= 3:
+        for code, scraper in SCRAPER_REGISTRY.items():
+            target = normalize_card_query(scraper.card_name)
+            bank_target = normalize_card_query(scraper.bank_name)
+            if (
+                target
+                and len(target) >= 3
+                and (target in query or query in target)
+                and _bank_name_compatible(bank_query, bank_target)
+            ):
                 return code
     return None
 
@@ -119,13 +125,43 @@ def match_existing_card(
     if not query:
         return None
 
-    for card in list_cards(db_path):
+    cards = list_cards(db_path)
+
+    # 1. Exact match first (including bank-prefix stripped match when bank_name is supplied)
+    for card in cards:
         target = normalize_card_query(card.card_name)
         bank_target = normalize_card_query(card.bank_name)
-        if target and (target == query or target in query or query in target):
-            if not bank_query or bank_query in bank_target or bank_target in bank_query:
+        if not _bank_name_compatible(bank_query, bank_target):
+            continue
+        if target == query:
+            return card
+        if bank_query:
+            bank_short = bank_query.replace("銀行", "").replace("台北", "")
+            stripped_target = (
+                target[len(bank_short) :]
+                if bank_short and target.startswith(bank_short) and len(target) > len(bank_short)
+                else target
+            )
+            if stripped_target == query:
                 return card
-    return None
+
+    # 2. Substring fallback with >= 3-char minimum length to avoid cross-card overwrites
+    if len(query) < 3:
+        return None
+
+    best_match: Optional[CardOut] = None
+    best_overlap = 0
+    for card in cards:
+        target = normalize_card_query(card.card_name)
+        bank_target = normalize_card_query(card.bank_name)
+        if not target or len(target) < 3 or not _bank_name_compatible(bank_query, bank_target):
+            continue
+        if target in query or query in target:
+            overlap = min(len(target), len(query))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_match = card
+    return best_match
 
 
 def _score_candidate_url(href: str, card_name: str, snippet_text: str = "") -> int:
@@ -239,31 +275,40 @@ async def discover_official_url(
     search_url = f"https://www.bing.com/search?q={quote_plus(query)}"
 
     try:
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-        body_text = (await page.locator("body").inner_text()).lower()
+        response = await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+        if response is not None and response.status >= 400:
+            return None, f"搜尋引擎回應異常（HTTP {response.status}）"
+        snapshot = await page.evaluate(
+            """() => {
+                const bodyText = (document.body?.innerText || "").toLowerCase();
+                const items = Array.from(document.querySelectorAll("li.b_algo")).slice(0, 15);
+                const results = items.map((item) => {
+                    const anchor = item.querySelector("h2 a");
+                    return {
+                        href: anchor ? (anchor.getAttribute("href") || "") : "",
+                        snippet: (item.textContent || "").trim(),
+                    };
+                }).filter((x) => x.href);
+                return { bodyText, results };
+            }"""
+        )
     except Exception as exc:
         return None, f"搜尋引擎連線失敗（{type(exc).__name__}）"
 
+    body_text = snapshot.get("bodyText") or ""
     if any(marker in body_text for marker in SEARCH_BLOCK_MARKERS):
         return None, "搜尋引擎觸發驗證或防爬機制，無法自動搜尋"
 
-    links = page.locator("li.b_algo")
-    count = min(await links.count(), 15)
     candidates: List[Tuple[int, str]] = []
     skipped_discontinued = 0
-    for i in range(count):
-        item = links.nth(i)
-        anchor = item.locator("h2 a").first
-        if await anchor.count() == 0:
-            continue
-        raw_href = await anchor.get_attribute("href")
-        href = unwrap_search_result_url(raw_href or "")
+    for entry in snapshot.get("results") or []:
+        href = unwrap_search_result_url(entry.get("href") or "")
         if not href:
             continue
         ok, _ = validate_public_http_url(href)
         if not ok:
             continue
-        snippet_text = (await item.text_content() or "").strip()
+        snippet_text = entry.get("snippet") or ""
         if detect_discontinued_marker(snippet_text) or detect_discontinued_marker(href):
             skipped_discontinued += 1
             continue
@@ -280,6 +325,13 @@ async def discover_official_url(
     return candidates[0][1], None
 
 
+_PROMO_BASE_EXCLUDE_MARKERS = ("加碼", "最高", "活動", "新戶", "限時", "登錄", "指定")
+
+
+def _is_clean_base_rate_snippet(text: str) -> bool:
+    return not any(tok in text for tok in _PROMO_BASE_EXCLUDE_MARKERS)
+
+
 async def parse_generic_card_page(
     page: Page,
     card_name: str,
@@ -294,44 +346,44 @@ async def parse_generic_card_page(
     resolved_bank = infer_bank_name(official_url, title, bank_name)
     resolved_slug = card_slug or build_custom_card_slug(card_name, resolved_bank)
 
-    raw_texts = await page.evaluate(
-        """() => {
-            const root = document.querySelector("main, [role='main']") || document.body;
-            const nodes = Array.from(
-                root.querySelectorAll("section, article, li, tr, dd, h2, h3, h4, h5, h6, [class*='benefit'], [class*='card'], [class*='reward'], [class*='promo'], [class*='info'], [class*='feature'], [class*='item'], p, div")
-            );
-            const out = [];
-            const seen = new Set();
-            for (const el of nodes) {
-                if (el.closest("header, nav, footer")) continue;
-                const text = (el.innerText || "").replace(/\\s+/g, " ").trim();
-                if (!text.includes("%") || text.length < 6 || text.length > 400 || seen.has(text)) continue;
-                seen.add(text);
-                out.push(text);
-                if (out.length >= 120) break;
-            }
-            return out;
-        }"""
+    raw_texts = await collect_dom_text_blocks(
+        page,
+        "section, article, li, tr, dd, h2, h3, h4, h5, h6, [class*='benefit'], [class*='card'], [class*='reward'], [class*='promo'], [class*='info'], [class*='feature'], [class*='item'], p, div",
+        max_items=120,
+        include_hidden_tabs=True,
     )
 
     blocks: List[Dict[str, Optional[str]]] = []
     seen_texts = set()
     base_domestic = 0.5
     base_foreign = 0.5
+    found_clean_domestic = False
+    found_clean_foreign = False
 
     for text in raw_texts:
         if "%" not in text or len(text) < 6 or len(text) > 400 or text in seen_texts:
             continue
         seen_texts.add(text)
+        if is_non_reward_snippet(text):
+            continue
 
+        is_clean = _is_clean_base_rate_snippet(text)
         if "一般消費" in text or "國內消費" in text:
             parsed_base = extract_percentage(text)
             if parsed_base is not None and parsed_base <= 5.0:
-                base_domestic = parsed_base
+                if is_clean and not found_clean_domestic:
+                    base_domestic = parsed_base
+                    found_clean_domestic = True
+                elif not found_clean_domestic:
+                    base_domestic = parsed_base
         if "海外" in text or "國外" in text:
             parsed_foreign = extract_percentage(text)
             if parsed_foreign is not None and parsed_foreign <= 5.0:
-                base_foreign = parsed_foreign
+                if is_clean and not found_clean_foreign:
+                    base_foreign = parsed_foreign
+                    found_clean_foreign = True
+                elif not found_clean_foreign:
+                    base_foreign = parsed_foreign
 
         blocks.append({"plan_name": None, "title": "", "text": text})
 
@@ -357,29 +409,33 @@ async def scrape_custom_card(
     official_url: Optional[str] = None,
     mode: str = "live",
     db_path: Optional[Path] = None,
+    lang: Optional[str] = None,
 ) -> ScrapeResultItem:
     """Scrape a user-specified credit card using Playwright and update SQLite."""
-    cleaned_name = card_name.strip()
-    cleaned_bank = bank_name.strip() if bank_name else None
+    resolved_lang = normalize_lang(lang)
+    raw_name = card_name.strip()
+    cleaned_name = canonicalize_card_name(raw_name)
+    cleaned_bank = canonicalize_bank_name(bank_name) if bank_name and bank_name.strip() else None
     cleaned_url = official_url.strip() if official_url else None
+    display_name = translate_card_name(cleaned_name, resolved_lang) if cleaned_name == raw_name or resolved_lang == "en" else raw_name
 
     if detect_discontinued_marker(cleaned_name):
         return ScrapeResultItem(
             bank_code="custom",
             card_slug="",
             status="warning",
-            message=f"「{cleaned_name}」標示為停發／停止申辦卡片，已依設定略過不抓取。",
+            message=t_backend("custom_discontinued_query", resolved_lang, card_name=display_name),
             url=cleaned_url or "",
         )
 
     if cleaned_url:
-        ok, err = validate_public_http_url(cleaned_url)
+        ok, err = validate_public_http_url(cleaned_url, lang=resolved_lang)
         if not ok:
             return ScrapeResultItem(
                 bank_code="custom",
                 card_slug="",
                 status="error",
-                message=f"網址驗證失敗：{err}",
+                message=t_backend("custom_url_invalid", resolved_lang, err=err),
                 url=cleaned_url,
             )
 
@@ -398,18 +454,9 @@ async def scrape_custom_card(
     elif not target_url:
         target_url = _lookup_catalog_url(cleaned_name, cleaned_bank, db_path)
 
-    if not target_url and mode == "live":
-        bank_code_hint = _match_bank_code_by_name(cleaned_bank)
-        if bank_code_hint:
-            await discover_bank_cards_via_playwright(bank_code_hint, db_path=db_path)
-            target_url = _lookup_catalog_url(cleaned_name, cleaned_bank, db_path)
-
     if mode == "demo_html":
         if not matched_code:
-            msg = (
-                f"「{cleaned_name}」屬於自訂新卡片，沒有內建離線示範 HTML；"
-                "請改用即時爬取（live），或直接提供該卡官網網址進行測試。"
-            )
+            msg = t_backend("custom_demo_unsupported", resolved_lang, card_name=display_name)
             log_scrape("custom", target_slug, target_url or "", "warning", msg, 0, db_path=db_path)
             return ScrapeResultItem(
                 bank_code="custom",
@@ -419,16 +466,20 @@ async def scrape_custom_card(
                 url=target_url or "",
             )
 
-    async with get_playwright_semaphore():
-        async with async_playwright() as p:
-            browser = await _launch_browser(p)
-            context = await browser.new_context(
-                user_agent=USER_AGENT,
-                locale="zh-TW",
-                viewport={"width": 1280, "height": 900},
-            )
-            page = await context.new_page()
+    try:
+        async with open_scraper_page(
+            block_resources=(mode != "demo_html"),
+            enforce_public_urls=(mode != "demo_html"),
+        ) as page:
             try:
+                if not target_url and mode == "live":
+                    bank_code_hint = _match_bank_code_by_name(cleaned_bank)
+                    if bank_code_hint:
+                        await discover_bank_cards_on_page(
+                            page, bank_code_hint, db_path=db_path, lang=resolved_lang
+                        )
+                        target_url = _lookup_catalog_url(cleaned_name, cleaned_bank, db_path)
+
                 if matched_code and not cleaned_url:
                     scraper = SCRAPER_REGISTRY[matched_code]
                     card_data = (
@@ -440,9 +491,11 @@ async def scrape_custom_card(
                     if not target_url:
                         discovered, reason = await discover_official_url(page, cleaned_name, cleaned_bank)
                         if not discovered:
-                            msg = (
-                                f"無法自動定位「{cleaned_name}」的官網頁面（{reason}），"
-                                "請於下方補填該卡的「官方介紹頁網址」再試一次。"
+                            msg = t_backend(
+                                "custom_url_not_found",
+                                resolved_lang,
+                                card_name=display_name,
+                                reason=reason,
                             )
                             log_scrape(bank_code, target_slug, "", "warning", msg, 0, db_path=db_path)
                             return ScrapeResultItem(
@@ -453,11 +506,12 @@ async def scrape_custom_card(
                             )
                         target_url = discovered
 
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=5000)
-                    except Exception:
-                        pass
+                    await navigate_and_wait(page, target_url, timeout_ms=20000)
+                    if page.url.startswith(("http://", "https://")):
+                        ok_final, err_final = validate_public_http_url(page.url, lang=resolved_lang)
+                        if not ok_final:
+                            raise RuntimeError(err_final)
+                    await expand_hidden_tabs(page)
 
                     card_data = await parse_generic_card_page(
                         page=page,
@@ -471,9 +525,11 @@ async def scrape_custom_card(
 
                 discontinued_reason = await check_page_discontinued(page, target_url or "")
                 if discontinued_reason:
-                    msg = (
-                        f"偵測到「{card_data.card_name}」已停發或停止申辦（{discontinued_reason}），"
-                        "已略過不寫入資料庫。"
+                    msg = t_backend(
+                        "custom_discontinued_page",
+                        resolved_lang,
+                        card_name=translate_card_name(card_data.card_name, resolved_lang),
+                        reason=discontinued_reason,
                     )
                     log_scrape(
                         bank_code,
@@ -493,9 +549,10 @@ async def scrape_custom_card(
                     )
 
                 if not card_data.rules:
-                    msg = (
-                        f"已開啟頁面但未解析出「{card_data.card_name}」的結構化回饋規則"
-                        "（可能因官網改版、JS 動態載入或防爬阻擋），未更動既有資料。"
+                    msg = t_backend(
+                        "custom_no_rules",
+                        resolved_lang,
+                        card_name=translate_card_name(card_data.card_name, resolved_lang),
                     )
                     log_scrape(bank_code, card_data.card_slug, target_url or "", "warning", msg, 0, db_path=db_path)
                     return ScrapeResultItem(
@@ -507,7 +564,13 @@ async def scrape_custom_card(
                     )
 
                 upsert_card(card_data, db_path=db_path)
-                msg = f"成功透過 Playwright 解析並更新「{card_data.bank_name} {card_data.card_name}」共 {len(card_data.rules)} 條通路規則"
+                msg = t_backend(
+                    "custom_success",
+                    resolved_lang,
+                    bank_name=translate_bank_name(card_data.bank_name, resolved_lang),
+                    card_name=translate_card_name(card_data.card_name, resolved_lang),
+                    count=len(card_data.rules),
+                )
                 log_scrape(
                     bank_code,
                     card_data.card_slug,
@@ -526,7 +589,14 @@ async def scrape_custom_card(
                     url=target_url or card_data.official_url,
                 )
             except Exception as exc:
-                msg = f"爬取「{cleaned_name}」失敗：{type(exc).__name__}: {str(exc)[:180]}"
+                logger.warning("Custom card scrape '%s' failed: %s", cleaned_name, exc, exc_info=True)
+                msg = t_backend(
+                    "custom_error",
+                    resolved_lang,
+                    card_name=display_name,
+                    exc_type=type(exc).__name__,
+                    err=summarize_scraper_error(exc, resolved_lang),
+                )
                 log_scrape(bank_code, target_slug, target_url or "", "error", msg, 0, db_path=db_path)
                 return ScrapeResultItem(
                     bank_code=bank_code,
@@ -535,7 +605,5 @@ async def scrape_custom_card(
                     message=msg,
                     url=target_url or "",
                 )
-            finally:
-                await page.close()
-                await context.close()
-                await browser.close()
+    except ScraperBusyError:
+        raise

@@ -4,7 +4,12 @@ from typing import Dict, List, Optional
 from playwright.async_api import Page
 
 from app.models import CardIn
-from app.scrapers.base import BaseBankScraper, build_rules_from_blocks, extract_percentage
+from app.scrapers.base import (
+    BaseBankScraper,
+    build_rules_from_blocks,
+    collect_dom_text_blocks,
+    extract_percentage,
+)
 
 
 class CathayCubeScraper(BaseBankScraper):
@@ -52,44 +57,54 @@ class CathayCubeScraper(BaseBankScraper):
     async def parse_page(self, page: Page, source_type: str = "scraped") -> CardIn:
         blocks: List[Dict[str, Optional[str]]] = []
 
-        # 1. Try structured plan sections first
-        plan_sections = page.locator("section.cube-plan, [data-plan]")
-        plan_count = await plan_sections.count()
-        if plan_count > 0:
-            for i in range(plan_count):
-                sec = plan_sections.nth(i)
-                plan_name = await sec.get_attribute("data-plan")
-                if not plan_name:
-                    heading = sec.locator("h2, h3").first
-                    if await heading.count() > 0:
-                        plan_name = (await heading.inner_text()).strip()
-                items = sec.locator(".benefit-item, li, p")
-                item_count = await items.count()
-                if item_count > 0:
-                    for j in range(item_count):
-                        text = (await items.nth(j).inner_text()).strip()
-                        if "%" in text:
-                            blocks.append({"plan_name": plan_name, "title": plan_name, "text": text})
-                else:
-                    text = (await sec.inner_text()).strip()
-                    blocks.append({"plan_name": plan_name, "title": plan_name, "text": text})
+        # 1. Try structured plan sections first in a single IPC call (supports hidden tab panels)
+        structured = await page.evaluate(
+            """() => {
+                const sections = Array.from(document.querySelectorAll("section.cube-plan, [data-plan]"));
+                const out = [];
+                for (const sec of sections) {
+                    if (sec.closest("header, nav, footer")) continue;
+                    const planAttr = (sec.getAttribute("data-plan") || "").trim();
+                    const headingText = (sec.querySelector("h2, h3")?.textContent || "").replace(/\\s+/g, " ").trim();
+                    const planName = planAttr || headingText || null;
+                    const items = Array.from(sec.querySelectorAll(".benefit-item, li, p"));
+                    if (items.length > 0) {
+                        for (const item of items) {
+                            const txt = (item.innerText || item.textContent || "").replace(/\\s+/g, " ").trim();
+                            if (txt.includes("%")) {
+                                out.push({ plan_name: planName, title: planName || "", text: txt });
+                            }
+                        }
+                    } else {
+                        const txt = (sec.innerText || sec.textContent || "").replace(/\\s+/g, " ").trim();
+                        if (txt) {
+                            out.push({ plan_name: planName, title: planName || "", text: txt });
+                        }
+                    }
+                }
+                return out;
+            }"""
+        )
+        blocks.extend(structured)
 
         # 2. Fallback generic DOM scanning for live bank pages with dynamic classes
         if not blocks:
-            candidates = page.locator("section, article, li, [class*='benefit'], [class*='card']")
-            count = min(await candidates.count(), 80)
+            raw_texts = await collect_dom_text_blocks(
+                page,
+                "section, article, li, [class*='benefit'], [class*='card']",
+                max_items=80,
+            )
             known_plans = ["玩數位", "樂饗購", "趣旅行", "集精選", "慶生月"]
-            for i in range(count):
-                text = (await candidates.nth(i).inner_text()).strip()
-                if "%" not in text or len(text) > 400:
-                    continue
+            for text in raw_texts:
                 detected_plan = next((p for p in known_plans if p in text), None)
                 blocks.append({"plan_name": detected_plan, "title": "", "text": text})
 
         base_domestic = 0.3
-        base_locator = page.locator(".base-rate").first
-        if await base_locator.count() > 0:
-            parsed_base = extract_percentage(await base_locator.inner_text())
+        base_text = await page.evaluate(
+            "() => (document.querySelector('.base-rate')?.innerText || document.querySelector('.base-rate')?.textContent || '').trim()"
+        )
+        if base_text:
+            parsed_base = extract_percentage(base_text)
             if parsed_base is not None:
                 base_domestic = parsed_base
 
